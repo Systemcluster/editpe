@@ -1,0 +1,44 @@
+[package]
+
+authors = ["Christian Sdunek <me@systemcluster.me>"]
+categories = [
+  "development-tools::build-utils",
+  "os::windows-apis",
+  "command-line-utilities",
+]
+keywords = ["parser", "resource", "windows", "executable", "binary"]
+description = "Resource Editor for Portable Executables"
+edition = "2021"
+include = [
+  "Cargo.toml",
+  "src/**/*",
+  "LICENSE",
+]
+license = "BSD-2-Clause"
+name = "editpe"
+readme = "README.md"
+repository = "https://github.com/Systemcluster/editpe"
+version = "0.0.0"
+
+[lib]
+
+name = "editpe"
+path = "src/lib.rs"
+doctest = false
+
+[dependencies]
+
+indexmap = { version = "2.0" }
+log = { version = "0.4" }
+thiserror = { version = "1.0" }
+zerocopy = { version = "0.6" }
+debug-ignore = { version = "1.0" }
+
+[dev-dependencies]
+
+env_logger = "0.10"
+
+[package.metadata.docs.rs]
+
+rustdoc-args = ["--cfg", "docsrs"]
+all-features = true
