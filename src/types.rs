@@ -244,3 +244,24 @@ pub struct ResourceDataEntry {
     pub codepage: u32,
     pub reserved: u32,
 }
+
+#[repr(C, packed(2))]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, FromBytes, AsBytes, Default)]
+pub struct IconDirectory {
+    pub reserved: u16,
+    pub type_:    u16,
+    pub count:    u16,
+}
+
+#[repr(C, packed(1))]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, FromBytes, AsBytes, Default)]
+pub struct IconDirectoryEntry {
+    pub width:       u8,
+    pub height:      u8,
+    pub color_count: u8,
+    pub reserved:    u8,
+    pub planes:      u16,
+    pub bit_count:   u16,
+    pub bytes:       u32,
+    pub id:          u16,
+}

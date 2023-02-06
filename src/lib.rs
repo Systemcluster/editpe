@@ -7,6 +7,8 @@
 //!
 //! See [`Image`] for the main entry point for parsing, querying and updating a portable executable image.
 
+#![cfg_attr(docsrs, feature(doc_auto_cfg))]
+
 pub(crate) mod errors;
 pub(crate) mod image;
 pub(crate) mod resource;

@@ -5,6 +5,7 @@ static BINARY_PATH_SMALL: &str = "./tests/assets/smallbin.exe";
 static BINARY_PATH_LARGE: &str = "./tests/assets/smallbin-large.exe";
 static BINARY_PATH_UPX: &str = "./tests/assets/smallbin-large-upx.exe";
 static BINARY_PATH_WRAPPE: &str = "./tests/assets/smallbin-wrappe.exe";
+static BINARY_PATH_ICON: &str = "./tests/assets/icon.png";
 
 static INIT_LOGGER: Once = Once::new();
 fn init_logger() {
@@ -368,4 +369,92 @@ fn convert_resource_name_string() {
         Some("MAINICON".to_string()),
         "resource name conversion to string is correct",
     );
+}
+
+#[test]
+fn remove_icon() {
+    init_logger();
+
+    let data_large = std::fs::read(BINARY_PATH_LARGE).unwrap();
+    let mut image_large = Image::parse(&data_large[..]).unwrap();
+
+    let mut target_resource_directory =
+        image_large.resource_directory().cloned().unwrap_or_default();
+
+    let size_before = target_resource_directory.size();
+    target_resource_directory.remove_icon().unwrap();
+    let size_after = target_resource_directory.size();
+
+    assert!(size_before > size_after, "resource directory is smaller after removing icon");
+
+    image_large.set_resource_directory(target_resource_directory.clone()).unwrap();
+
+    let data_large_rebuilt = image_large.data();
+
+    assert!(
+        data_large_rebuilt.len() == data_large.len(),
+        "rebuilt image is equal to original image"
+    );
+}
+
+#[test]
+fn get_icon() {
+    init_logger();
+
+    let data_large = std::fs::read(BINARY_PATH_LARGE).unwrap();
+    let image_large = Image::parse(&data_large[..]).unwrap();
+
+    let target_resource_directory = image_large.resource_directory().cloned().unwrap_or_default();
+
+    let icon = target_resource_directory.get_icon();
+    assert!(icon.is_ok(), "icon successfully parsed");
+    let icon = icon.unwrap();
+    assert!(icon.is_some(), "icon is present");
+}
+
+#[test]
+fn set_icon() {
+    init_logger();
+
+    let data_wrappe = std::fs::read(BINARY_PATH_WRAPPE).unwrap();
+    let mut image_wrappe = Image::parse(&data_wrappe[..]).unwrap();
+
+    let mut target_resource_directory =
+        image_wrappe.resource_directory().cloned().unwrap_or_default();
+
+    let data_icon = std::fs::read(BINARY_PATH_ICON).unwrap();
+
+    target_resource_directory.set_icon(&data_icon[..]).unwrap();
+
+    assert!(
+        target_resource_directory.size() > 0,
+        "resource directory is not empty after modification"
+    );
+    image_wrappe.set_resource_directory(target_resource_directory.clone()).unwrap();
+
+    let data_large_rebuilt = image_wrappe.data();
+    assert!(
+        data_large_rebuilt.len() > data_wrappe.len(),
+        "rebuilt image is larger than original image"
+    );
+
+    let image_large_rebuilt = Image::parse(data_large_rebuilt).unwrap();
+    assert_eq!(
+        image_wrappe.resource_directory().unwrap().root(),
+        image_large_rebuilt.resource_directory().unwrap().root(),
+        "replaced and rebuilt resource directories are equal"
+    );
+
+    let icon_directory = image_large_rebuilt
+        .resource_directory()
+        .unwrap()
+        .root()
+        .get(ResourceEntryName::ID(constants::RT_GROUP_ICON as u32))
+        .unwrap();
+    if let ResourceEntry::Table(table) = icon_directory {
+        let group_icon = table.get(ResourceEntryName::from_string("MAINICON")).unwrap();
+        assert!(group_icon.data_size() > 0, "resource directory contains main icon group");
+    } else {
+        panic!("resource icon group directory is not a table");
+    }
 }

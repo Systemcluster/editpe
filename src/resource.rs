@@ -5,9 +5,14 @@
 use std::{borrow::Borrow, mem::size_of};
 
 use debug_ignore::DebugIgnore;
-use indexmap::IndexMap;
+use indexmap::{IndexMap, IndexSet};
 use log::{error, trace, warn};
 use zerocopy::AsBytes;
+
+#[cfg(feature = "image")]
+use image::{imageops::FilterType::Lanczos3, io::Reader as ImageReader, ImageOutputFormat};
+#[cfg(feature = "image")]
+use std::io::Cursor;
 
 use crate::{constants::*, errors::*, types::*, util::*};
 
@@ -32,6 +37,342 @@ impl ResourceDirectory {
             virtual_address,
             root,
         })
+    }
+
+    /// Get the icon of the executable.
+    /// The icon will be the first icon in the `MAINICON` group icon directory if it exists.
+    /// Otherwise, the first icon in the first group icon directory will be returned.
+    ///
+    /// # Returns
+    /// Returns `None` if no icon exists.
+    /// Returns an error if the resource table structure is not well-formed.
+    pub fn get_icon(&self) -> Result<Option<&[u8]>, ResourceError> {
+        if self.root.entries.is_empty() {
+            return Ok(None);
+        }
+
+        // find the group icon table
+        let group_table = self.root.get(ResourceEntryName::ID(RT_GROUP_ICON as u32));
+        let group_table = match group_table {
+            Some(ResourceEntry::Table(t)) => t,
+            Some(_) => {
+                return Err(ResourceError::InvalidTable(
+                    "group icon table is not a table".to_string(),
+                ));
+            }
+            _ => return Ok(None),
+        };
+        if group_table.entries.is_empty() {
+            return Ok(None);
+        }
+
+        // find the main icon directory table
+        let icon_directory_table = group_table
+            .entries
+            .get(&ResourceEntryName::from_string("MAINICON"))
+            .or_else(|| group_table.entries.first().map(|(_, v)| v));
+        let icon_directory_table = match icon_directory_table {
+            Some(ResourceEntry::Table(t)) => t,
+            Some(_) => {
+                return Err(ResourceError::InvalidTable(
+                    "inner group icon table is not a table".to_string(),
+                ));
+            }
+            None => return Ok(None),
+        };
+        if icon_directory_table.entries.is_empty() {
+            return Ok(None);
+        }
+
+        // find the main icon directory
+        let icon_directory_entry = icon_directory_table.entries.first().map(|(_, v)| v).unwrap();
+        if icon_directory_entry.is_table() {
+            return Err(ResourceError::InvalidTable(
+                "group icon table entry is not data".to_string(),
+            ));
+        }
+        let icon_directory_entry = icon_directory_entry.as_data().unwrap();
+        let icon_directory = read::<IconDirectory>(&icon_directory_entry.data)?;
+
+        // get the first icon in the main icon directory
+        if icon_directory.count == 0 {
+            return Ok(None);
+        }
+        let icon_directory_entry = read::<IconDirectoryEntry>(&icon_directory_entry.data[6..])?;
+        let icon_id = icon_directory_entry.id as u32;
+
+        // find the main icon table
+        let icon_table = self.root.get(ResourceEntryName::ID(RT_ICON as u32));
+        if icon_table.is_none() {
+            return Ok(None);
+        }
+        let icon_table = match icon_table.unwrap() {
+            ResourceEntry::Table(table) => table,
+            ResourceEntry::Data(_) => {
+                return Err(ResourceError::InvalidTable("icon table is not a table".to_string()));
+            }
+        };
+
+        let inner_table = icon_table.get(ResourceEntryName::ID(icon_id));
+        let inner_table = match inner_table {
+            Some(ResourceEntry::Table(t)) => t,
+            Some(_) => {
+                return Err(ResourceError::InvalidTable(
+                    "inner icon table is not a table".to_string(),
+                ));
+            }
+            None => return Ok(None),
+        };
+        if inner_table.entries.is_empty() {
+            return Ok(None);
+        }
+
+        // get the main icon from the icon table
+        let icon = match inner_table.entries.first().map(|(_, v)| v) {
+            Some(ResourceEntry::Table(_)) => {
+                return Err(ResourceError::InvalidTable(
+                    "icon table entry is not data".to_string(),
+                ));
+            }
+            Some(ResourceEntry::Data(data)) => data,
+            None => return Ok(None),
+        };
+
+        Ok(Some(icon.data()))
+    }
+
+    #[cfg(feature = "image")]
+    /// Set the icon of the executable.
+    /// The icon must be the byte slice of a valid image file.
+    ///
+    /// This will overwrite the group icon directory with the `MAINICON` name if it exists and keep all other group icon directories intact.
+    /// This will not remove any existing icons.
+    /// To remove the existing main icon directory and the icons referenced by, call `remove_icon` before setting a new one.
+    ///
+    /// # Returns
+    /// Returns an error if the new icon not a valid image or the resource table structure is not well-formed.
+    pub fn set_icon<T: AsRef<[u8]>>(&mut self, icon: T) -> Result<(), ResourceError> {
+        let icon = icon.as_ref();
+        let icon = ImageReader::new(Cursor::new(icon)).with_guessed_format()?.decode()?;
+
+        // find the main icon table
+        if self.root.get(ResourceEntryName::ID(RT_ICON as u32)).is_none() {
+            self.root.insert(
+                ResourceEntryName::ID(RT_ICON as u32),
+                ResourceEntry::Table(ResourceTable::default()),
+            );
+        }
+        let icon_table = match self.root.get_mut(ResourceEntryName::ID(RT_ICON as u32)).unwrap() {
+            ResourceEntry::Table(table) => table,
+            ResourceEntry::Data(_) => {
+                return Err(ResourceError::InvalidTable("icon table is not a table".to_string()));
+            }
+        };
+
+        // find the first free icon id
+        let first_free_icon_id = icon_table
+            .entries
+            .keys()
+            .filter_map(|k| match k {
+                ResourceEntryName::ID(id) => Some(*id),
+                _ => None,
+            })
+            .max()
+            .unwrap_or(0)
+            + 1;
+
+        // add the icon to the icon table
+        let mut icon_directory_entries = Vec::new();
+        let resolutions = [256, 128, 48, 32, 24, 16];
+        for (i, &size) in resolutions.iter().enumerate() {
+            let id = first_free_icon_id + i as u32;
+            let mut inner_table = ResourceTable::default();
+            inner_table.insert(
+                ResourceEntryName::ID(LANGUAGE_ID_EN_US as u32),
+                ResourceEntry::Data(ResourceData {
+                    data:     {
+                        let mut data = Vec::new();
+                        icon.resize_exact(size, size, Lanczos3)
+                            .to_rgba8()
+                            .write_to(&mut Cursor::new(&mut data), ImageOutputFormat::Ico)?;
+                        let mut entry = read::<IconDirectoryEntry>(&data[6..20])?;
+                        entry.id = id as u16;
+                        icon_directory_entries.push(entry);
+                        data[22..].to_owned().into()
+                    },
+                    codepage: CODE_PAGE_ID_EN_US as u32,
+                    reserved: 0,
+                }),
+            );
+            icon_table.insert(ResourceEntryName::ID(id), ResourceEntry::Table(inner_table));
+        }
+
+        // find the group icon table
+        if self.root.get(ResourceEntryName::ID(RT_GROUP_ICON as u32)).is_none() {
+            self.root.insert(
+                ResourceEntryName::ID(RT_GROUP_ICON as u32),
+                ResourceEntry::Table(ResourceTable::default()),
+            );
+        }
+        let group_table =
+            match self.root.get_mut(ResourceEntryName::ID(RT_GROUP_ICON as u32)).unwrap() {
+                ResourceEntry::Table(table) => table,
+                ResourceEntry::Data(_) => {
+                    return Err(ResourceError::InvalidTable(
+                        "group icon table is not a table".to_string(),
+                    ));
+                }
+            };
+
+        // insert the main icon directory table
+        let mut inner_table = ResourceTable::default();
+        inner_table.insert(
+            ResourceEntryName::ID(LANGUAGE_ID_EN_US as u32),
+            ResourceEntry::Data(ResourceData {
+                data:     {
+                    let mut data = Vec::new();
+                    let icon_directory = IconDirectory {
+                        reserved: 0,
+                        type_:    1,
+                        count:    icon_directory_entries.len() as u16,
+                    };
+                    data.extend(icon_directory.as_bytes());
+                    for entry in icon_directory_entries {
+                        data.extend(&entry.as_bytes()[..14]);
+                    }
+                    data.into()
+                },
+                codepage: CODE_PAGE_ID_EN_US as u32,
+                reserved: 0,
+            }),
+        );
+        group_table.insert_at(
+            ResourceEntryName::from_string("MAINICON"),
+            ResourceEntry::Table(inner_table),
+            0,
+        );
+
+        Ok(())
+    }
+
+    /// Remove the main icon directory and all icons uniquely referenced by it.
+    ///
+    /// # Returns
+    /// Returns an error if the icon resource directory is invalid.
+    pub fn remove_icon(&mut self) -> Result<(), ResourceError> {
+        if self.root.entries.is_empty() {
+            return Ok(());
+        }
+
+        // find the group table
+        let group_table = self.root.get_mut(ResourceEntryName::ID(RT_GROUP_ICON as u32));
+        let group_table = match group_table {
+            Some(ResourceEntry::Table(t)) => t,
+            Some(_) => {
+                return Err(ResourceError::InvalidTable(
+                    "group icon table is not a table".to_string(),
+                ));
+            }
+            _ => return Ok(()),
+        };
+        if group_table.entries.is_empty() {
+            return Ok(());
+        }
+
+        // find the main icon directory table
+        let mut icon_directory_name = ResourceEntryName::from_string("MAINICON");
+        let mut icon_directory_table = group_table.get(&icon_directory_name);
+        if icon_directory_table.is_none() {
+            icon_directory_table = group_table.entries.first().map(|(name, v)| {
+                icon_directory_name = name.clone();
+                v
+            });
+        }
+        let icon_directory_table = match icon_directory_table {
+            Some(ResourceEntry::Table(t)) => t,
+            Some(_) => {
+                return Err(ResourceError::InvalidTable(
+                    "inner group icon table is not a table".to_string(),
+                ));
+            }
+            _ => return Ok(()),
+        };
+        if icon_directory_table.entries.is_empty() {
+            return Ok(());
+        }
+
+        // find the main icon directory
+        let icon_directory_entry = icon_directory_table.entries.first().map(|(_, v)| v).unwrap();
+        if icon_directory_entry.is_table() {
+            return Err(ResourceError::InvalidTable(
+                "group icon table entry is not data".to_string(),
+            ));
+        }
+        let icon_directory_entry = icon_directory_entry.as_data().unwrap();
+        let icon_directory = read::<IconDirectory>(&icon_directory_entry.data)?;
+
+        // get a list of all icons in the main icon directory for removal
+        let mut icons_to_remove = IndexSet::new();
+        for i in 0..icon_directory.count {
+            let icon_directory_entry = read::<IconDirectoryEntry>(
+                &icon_directory_entry.data[6 + i as usize * size_of::<IconDirectoryEntry>()..],
+            )?;
+            let icon_id = icon_directory_entry.id;
+            icons_to_remove.insert(icon_id);
+        }
+
+        // get a list of icons in other icon directories and remove them from the list
+        for (other_icon_directory_name, other_icon_directory_table) in group_table.entries.iter() {
+            if other_icon_directory_name == &icon_directory_name {
+                continue;
+            }
+            if !other_icon_directory_table.is_table() {
+                continue;
+            }
+            let other_icon_directory_table = other_icon_directory_table.as_table().unwrap();
+            if other_icon_directory_table.entries.is_empty() {
+                continue;
+            }
+            let other_icon_directory_entry =
+                other_icon_directory_table.entries.first().map(|(_, v)| v).unwrap();
+            if other_icon_directory_entry.is_table() {
+                continue;
+            }
+            let other_icon_directory_entry = other_icon_directory_entry.as_data().unwrap();
+            let other_icon_directory = read::<IconDirectory>(&other_icon_directory_entry.data)?;
+            for i in 0..other_icon_directory.count {
+                let icon_directory_entry = read::<IconDirectoryEntry>(
+                    &other_icon_directory_entry.data
+                        [6 + i as usize * size_of::<IconDirectoryEntry>()..],
+                )?;
+                let icon_id = icon_directory_entry.id;
+                icons_to_remove.remove(&icon_id);
+            }
+        }
+
+        // remove the main icon directory table
+        group_table.remove(&icon_directory_name);
+        if group_table.entries.is_empty() {
+            self.root.remove(&ResourceEntryName::ID(RT_GROUP_ICON as u32));
+        }
+
+        // find the main icon table
+        let icon_table = self.root.get_mut(ResourceEntryName::ID(RT_ICON as u32));
+        if icon_table.is_none() {
+            return Ok(());
+        }
+        let icon_table = icon_table.unwrap();
+        if !icon_table.is_table() {
+            return Ok(());
+        }
+        let icon_table = icon_table.as_table_mut().unwrap();
+
+        // remove the icons from the icon table
+        for icon_id in icons_to_remove {
+            icon_table.remove(&ResourceEntryName::ID(icon_id as u32));
+        }
+
+        Ok(())
     }
 
     /// Returns the virtual address of the resource directory in the source image.
@@ -297,6 +638,33 @@ impl ResourceTable {
         entry
     }
 
+    /// Insert a resource entry into the table at the specified position.
+    /// If an entry with the given name already exists, it will be replaced.
+    /// # Returns
+    /// The replaced entry.
+    pub fn insert_at<N: Borrow<ResourceEntryName>>(
+        &mut self, name: N, entry: ResourceEntry, position: usize,
+    ) -> Option<ResourceEntry> {
+        let name = name.borrow();
+        let len = self.entries.len();
+        let old_entry = self.entries.get(name).cloned();
+        let new_entry = self
+            .entries
+            .entry(name.clone())
+            .and_modify(|old_entry| *old_entry = entry.clone());
+        let index = new_entry.index();
+        new_entry.or_insert(entry);
+        self.entries.move_index(index, position);
+        if index >= len {
+            if name.string_size() > 0 {
+                self.data.number_of_name_entries += 1;
+            } else {
+                self.data.number_of_id_entries += 1;
+            }
+        }
+        old_entry
+    }
+
     /// Remove a resource entry from the table.
     /// # Returns
     /// The removed entry.
@@ -375,6 +743,54 @@ pub enum ResourceEntry {
     Data(ResourceData),
 }
 impl ResourceEntry {
+    /// Returns if the data is a table.
+    pub fn is_table(&self) -> bool {
+        match self {
+            ResourceEntry::Table(_) => true,
+            ResourceEntry::Data(_) => false,
+        }
+    }
+
+    /// Returns if the data is an entry.
+    pub fn is_data(&self) -> bool {
+        match self {
+            ResourceEntry::Table(_) => false,
+            ResourceEntry::Data(_) => true,
+        }
+    }
+
+    /// Returns the sub-table if the data is an table.
+    pub fn as_table(&self) -> Option<&ResourceTable> {
+        match self {
+            ResourceEntry::Table(table) => Some(table),
+            ResourceEntry::Data(_) => None,
+        }
+    }
+
+    /// Returns the mutable sub-table if the data is an table.
+    pub fn as_table_mut(&mut self) -> Option<&mut ResourceTable> {
+        match self {
+            ResourceEntry::Table(table) => Some(table),
+            ResourceEntry::Data(_) => None,
+        }
+    }
+
+    /// Returns the table entry if the data is an entry.
+    pub fn as_data(&self) -> Option<&ResourceData> {
+        match self {
+            ResourceEntry::Table(_) => None,
+            ResourceEntry::Data(entry) => Some(entry),
+        }
+    }
+
+    /// Returns the table entry if the data is an entry.
+    pub fn as_data_mut(&mut self) -> Option<&mut ResourceData> {
+        match self {
+            ResourceEntry::Table(_) => None,
+            ResourceEntry::Data(entry) => Some(entry),
+        }
+    }
+
     /// Returns the size of the table entry and its children in the resource table.
     pub fn table_size(&self) -> u32 {
         match self {
