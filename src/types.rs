@@ -265,3 +265,42 @@ pub struct IconDirectoryEntry {
     pub bytes:       u32,
     pub id:          u16,
 }
+
+#[repr(C, packed(4))]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, FromBytes, AsBytes)]
+pub struct FixedFileInfo {
+    pub signature:       u32,
+    pub struct_version:  VersionU16,
+    pub file_version:    VersionU32,
+    pub product_version: VersionU32,
+    pub file_flags_mask: u32,
+    pub file_flags:      u32,
+    pub file_os:         u32,
+    pub file_type:       u32,
+    pub file_subtype:    u32,
+    pub file_date:       u64,
+}
+impl Default for FixedFileInfo {
+    fn default() -> Self {
+        Self {
+            signature:       0xfeef04bd,
+            struct_version:  VersionU16 { major: 0, minor: 1 },
+            file_version:    VersionU32 { major: 1, minor: 0 },
+            product_version: VersionU32 { major: 1, minor: 0 },
+            file_flags_mask: 0x0000003f,
+            file_flags:      0x00000000,
+            file_os:         0x00040004,
+            file_type:       0x00000001,
+            file_subtype:    0x00000000,
+            file_date:       0x00000000,
+        }
+    }
+}
+
+#[repr(C, packed(2))]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, FromBytes, AsBytes, Default)]
+pub struct VersionHeader {
+    pub length:       u16,
+    pub value_length: u16,
+    pub type_:        u16,
+}

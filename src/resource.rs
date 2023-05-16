@@ -2,7 +2,7 @@
 //! The resource section contains the resource directory and the resource data.
 //! See <https://learn.microsoft.com/en-us/windows/win32/debug/pe-format#the-rsrc-section> for more information.
 
-use std::{borrow::Borrow, mem::size_of};
+use std::{borrow::Borrow, iter, mem::size_of};
 
 use debug_ignore::DebugIgnore;
 use indexmap::{IndexMap, IndexSet};
@@ -370,6 +370,163 @@ impl ResourceDirectory {
         // remove the icons from the icon table
         for icon_id in icons_to_remove {
             icon_table.remove(&ResourceEntryName::ID(icon_id as u32));
+        }
+
+        Ok(())
+    }
+
+    /// Get the version information of the executable.
+    ///
+    /// # Returns
+    /// Returns `None` if no version information exists.
+    /// Returns an error if the version resource directory is invalid.
+    pub fn get_version_info(&self) -> Result<Option<VersionInfo>, ResourceError> {
+        if self.root.entries.is_empty() {
+            return Ok(None);
+        }
+
+        // find the group table
+        let version_table = self.root.get(ResourceEntryName::ID(RT_VERSION as u32));
+        let version_table = match version_table {
+            Some(ResourceEntry::Table(t)) => t,
+            Some(_) => {
+                return Err(ResourceError::InvalidTable(
+                    "version table is not a table".to_string(),
+                ));
+            }
+            _ => return Ok(None),
+        };
+        if version_table.entries.is_empty() {
+            return Ok(None);
+        }
+
+        // find the main version directory table
+        let inner_table = version_table.entries.first().map(|(_, v)| v);
+        let inner_table = match inner_table {
+            Some(ResourceEntry::Table(t)) => t,
+            Some(_) => {
+                return Err(ResourceError::InvalidTable(
+                    "inner version table is not a table".to_string(),
+                ));
+            }
+            None => return Ok(None),
+        };
+        if inner_table.entries.is_empty() {
+            return Ok(None);
+        }
+
+        // find the main version directory
+        let version_directory_entry = inner_table
+            .entries
+            .iter()
+            .find(|(name, _)| **name == ResourceEntryName::ID(LANGUAGE_ID_EN_US as u32))
+            .or_else(|| inner_table.entries.first())
+            .map(|(_, v)| v)
+            .unwrap();
+        if version_directory_entry.is_table() {
+            return Err(ResourceError::InvalidTable("version table entry is not data".to_string()));
+        }
+        let version_directory_entry = version_directory_entry.as_data().unwrap();
+
+        Ok(Some(VersionInfo::parse(&version_directory_entry.data)?))
+    }
+
+    /// Set the version information of the executable.
+    ///
+    /// This will overwrite the existing version information.
+    ///
+    /// # Returns
+    /// Returns an error if the resource table structure is not well-formed.
+    pub fn set_version_info(&mut self, version_info: &VersionInfo) -> Result<(), ResourceError> {
+        // find the version table
+        if self.root.get(ResourceEntryName::ID(RT_VERSION as u32)).is_none() {
+            self.root.insert(
+                ResourceEntryName::ID(RT_VERSION as u32),
+                ResourceEntry::Table(ResourceTable::default()),
+            );
+        }
+        let version_table =
+            match self.root.get_mut(ResourceEntryName::ID(RT_VERSION as u32)).unwrap() {
+                ResourceEntry::Table(table) => table,
+                ResourceEntry::Data(_) => {
+                    return Err(ResourceError::InvalidTable(
+                        "version table is not a table".to_string(),
+                    ));
+                }
+            };
+
+        // find the main version directory table
+        let inner_table = version_table.entries.first().map(|(_, v)| v);
+        let mut inner_table = match inner_table {
+            Some(ResourceEntry::Table(t)) => t.clone(),
+            Some(_) => {
+                return Err(ResourceError::InvalidTable(
+                    "inner version table is not a table".to_string(),
+                ));
+            }
+            None => ResourceTable::default(),
+        };
+
+        inner_table.insert_at(
+            ResourceEntryName::ID(LANGUAGE_ID_EN_US as u32),
+            ResourceEntry::Data(ResourceData {
+                data:     version_info.build().into(),
+                codepage: CODE_PAGE_ID_EN_US as u32,
+                reserved: 0,
+            }),
+            0,
+        );
+        version_table.insert_at(ResourceEntryName::ID(1), ResourceEntry::Table(inner_table), 0);
+
+        Ok(())
+    }
+
+    /// Remove the version information of the executable.
+    ///
+    /// # Returns
+    /// Returns an error if the resource table structure is not well-formed.
+    pub fn remove_version_info(&mut self) -> Result<(), ResourceError> {
+        if self.root.entries.is_empty() {
+            return Ok(());
+        }
+
+        // find the version table
+        let version_table = self.root.get_mut(ResourceEntryName::ID(RT_VERSION as u32));
+        let version_table = match version_table {
+            Some(ResourceEntry::Table(t)) => t,
+            Some(_) => {
+                return Err(ResourceError::InvalidTable(
+                    "version table is not a table".to_string(),
+                ));
+            }
+            _ => return Ok(()),
+        };
+        if version_table.entries.is_empty() {
+            return Ok(());
+        }
+
+        // find the main version directory table
+        let inner_table = version_table.entries.first_mut().map(|(_, v)| v);
+        let inner_table = match inner_table {
+            Some(ResourceEntry::Table(t)) => t,
+            Some(_) => {
+                return Err(ResourceError::InvalidTable(
+                    "inner version table is not a table".to_string(),
+                ));
+            }
+            None => return Ok(()),
+        };
+        if inner_table.entries.is_empty() {
+            return Ok(());
+        }
+
+        // remove the main version directory
+        inner_table.remove(inner_table.entries.keys().next().unwrap().clone());
+        if inner_table.entries.is_empty() {
+            version_table.remove(version_table.entries.keys().next().unwrap().clone());
+        }
+        if version_table.entries.is_empty() {
+            self.root.remove(ResourceEntryName::ID(RT_VERSION as u32));
         }
 
         Ok(())
@@ -898,5 +1055,272 @@ impl ResourceEntryName {
             Self::ID(_) => &[],
             Self::Name(data) => data.as_bytes(),
         }
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct VersionStringTable {
+    pub key:     String,
+    pub strings: IndexMap<String, String>,
+}
+
+/// Version info resource.
+/// This is a special resource that contains the version information of the executable.
+#[derive(Debug, Clone, Eq, PartialEq, Default)]
+pub struct VersionInfo {
+    pub info:    FixedFileInfo,
+    pub strings: Vec<VersionStringTable>,
+    pub vars:    Vec<VersionU16>,
+}
+impl VersionInfo {
+    /// Parse the version info resource from a byte slice.
+    ///
+    /// # Returns
+    /// Returns an error if the version info resource is not well-formed.
+    pub fn parse(data: &[u8]) -> Result<Self, ReadError> {
+        // read the version root header
+        let header = read::<VersionHeader>(data)?;
+        if header.length as usize > data.len() {
+            return Err(ReadError(format!(
+                "version root length {:#x?} is larger than data length {:#x?}",
+                header.length,
+                data.len()
+            )));
+        }
+
+        let version_root_key =
+            read_u16_string(&data[size_of::<VersionHeader>()..size_of::<VersionHeader>() + 32])?;
+        if version_root_key != "VS_VERSION_INFO" {
+            return Err(ReadError(format!("invalid version root key: {:?}", version_root_key)));
+        }
+        let value_offset =
+            aligned_to(size_of::<VersionHeader>() + version_root_key.len() * 2 + 2, 4);
+
+        // read the fixed file info
+        if header.value_length != size_of::<FixedFileInfo>() as u16 {
+            return Err(ReadError(format!(
+                "invalid file info length: {:#x?}",
+                header.value_length
+            )));
+        }
+        let info = read::<FixedFileInfo>(&data[value_offset..])?;
+        if info.signature != 0xfeef04bd {
+            return Err(ReadError(format!(
+                "invalid fixed file info signature: {:#x?}",
+                info.signature
+            )));
+        }
+        let file_info_header_offset = aligned_to(value_offset + size_of::<FixedFileInfo>(), 4);
+
+        let mut child_offset = file_info_header_offset;
+        let mut strings = Vec::new();
+        let mut vars = Vec::new();
+
+        while child_offset < data.len() {
+            // read the file info header
+            let file_info_header = read::<VersionHeader>(&data[child_offset..])?;
+            let file_info_end = child_offset + file_info_header.length as usize;
+            let file_info_key =
+                read_u16_string(&data[child_offset + size_of::<VersionHeader>()..file_info_end])?;
+            let mut tables_offset = aligned_to(
+                child_offset + size_of::<VersionHeader>() + file_info_key.len() * 2 + 2,
+                4,
+            );
+
+            match file_info_key.as_str() {
+                "VarFileInfo" => {
+                    let var_header = read::<VersionHeader>(&data[tables_offset..])?;
+                    let var_end = tables_offset + var_header.length as usize;
+                    let table_key = read_u16_string(
+                        &data[tables_offset + size_of::<VersionHeader>()..var_end],
+                    )?;
+                    if &table_key != "Translation" {
+                        return Err(ReadError(format!("invalid var table key: {:?}", table_key)));
+                    }
+                    let vars_offset = aligned_to(
+                        tables_offset + size_of::<VersionHeader>() + table_key.len() * 2 + 2,
+                        4,
+                    );
+                    let mut var_offset = vars_offset;
+                    while var_offset < var_end {
+                        vars.push(read::<VersionU16>(&data[var_offset..])?);
+                        var_offset += size_of::<u32>();
+                    }
+                }
+                "StringFileInfo" => {
+                    while tables_offset < child_offset + file_info_header.length as usize {
+                        let string_table_header = read::<VersionHeader>(&data[tables_offset..])?;
+                        let string_table_end = tables_offset + string_table_header.length as usize;
+                        let string_table_key = read_u16_string(
+                            &data[tables_offset + size_of::<VersionHeader>()..string_table_end],
+                        )?;
+                        let strings_offset = aligned_to(
+                            tables_offset
+                                + size_of::<VersionHeader>()
+                                + string_table_key.len() * 2
+                                + 2,
+                            4,
+                        );
+
+                        let mut string_offset = strings_offset;
+                        let mut string_table = VersionStringTable {
+                            key:     string_table_key,
+                            strings: IndexMap::new(),
+                        };
+
+                        while string_offset < string_table_end {
+                            let string_header = read::<VersionHeader>(&data[string_offset..])?;
+                            string_offset += size_of::<VersionHeader>();
+                            let string_key = read_u16_string(
+                                &data[string_offset..string_offset + string_header.length as usize],
+                            )?;
+                            string_offset = aligned_to(string_offset + string_key.len() * 2 + 2, 4);
+
+                            if string_header.value_length == 0 {
+                                continue;
+                            }
+                            if string_header.type_ == 1 {
+                                let string_value = read_u16_string(
+                                    &data[string_offset
+                                        ..string_offset + string_header.value_length as usize * 2],
+                                )?;
+                                string_table.strings.insert(string_key, string_value);
+                            } else {
+                                error!(
+                                    "invalid string value type: {:#x?} (expected 0x1)",
+                                    string_header.type_
+                                );
+                            };
+                            string_offset = aligned_to(
+                                string_offset + string_header.value_length as usize * 2,
+                                4,
+                            );
+                        }
+                        tables_offset = aligned_to(string_table_end, 4);
+                        strings.push(string_table);
+                    }
+                }
+                _ => {
+                    return Err(ReadError(format!(
+                        "invalid version string key: {:?}",
+                        file_info_key
+                    )));
+                }
+            }
+            child_offset = aligned_to(child_offset + file_info_header.length as usize, 4);
+        }
+
+        Ok(Self {
+            info,
+            strings,
+            vars,
+        })
+    }
+
+    /// Build the version info into raw bytes to be included in a resource table.
+    pub fn build(&self) -> Vec<u8> {
+        let mut data = Vec::new();
+
+        let mut string_tables = Vec::new();
+        for string_table_data in &self.strings {
+            let mut string_table_children = Vec::new();
+            for (key, value) in &string_table_data.strings {
+                let mut string = Vec::new();
+                string.extend(
+                    VersionHeader {
+                        length:       ((aligned_to(6 + key.len() * 2 + 2, 4) + value.len() * 2 + 2)
+                            as u16),
+                        value_length: value.len() as u16 + 1,
+                        type_:        1,
+                    }
+                    .as_bytes(),
+                );
+                string.extend(string_to_u16(key));
+                string.extend(iter::repeat(0).take(aligned_to(string.len(), 4) - string.len()));
+                string.extend(string_to_u16(value));
+                string.extend(iter::repeat(0).take(aligned_to(string.len(), 4) - string.len()));
+                string_table_children.extend(string);
+            }
+            let mut string_table = Vec::new();
+            string_table.extend(
+                VersionHeader {
+                    length:       (aligned_to(6 + string_table_data.key.len() * 2 + 2, 4)
+                        + string_table_children.len()) as u16,
+                    value_length: 0,
+                    type_:        1,
+                }
+                .as_bytes(),
+            );
+            string_table.extend(string_to_u16(&string_table_data.key));
+            string_table.extend(
+                iter::repeat(0).take(aligned_to(string_table.len(), 4) - string_table.len()),
+            );
+            string_table.extend(string_table_children);
+            string_tables.extend(string_table);
+        }
+
+        let mut string_info = Vec::new();
+        string_info.extend(
+            VersionHeader {
+                length:       (aligned_to(6 + "StringFileInfo".len() * 2 + 2, 4)
+                    + string_tables.len()) as u16,
+                value_length: 0,
+                type_:        1,
+            }
+            .as_bytes(),
+        );
+        string_info.extend(string_to_u16("StringFileInfo"));
+        string_info
+            .extend(iter::repeat(0).take(aligned_to(string_info.len(), 4) - string_info.len()));
+        string_info.extend(string_tables);
+
+        let mut var = Vec::new();
+        var.extend(
+            VersionHeader {
+                length:       (aligned_to(6 + "Translation".len() * 2 + 2, 4) + self.vars.len() * 4)
+                    as u16,
+                value_length: (self.vars.len() * 4) as u16,
+                type_:        0,
+            }
+            .as_bytes(),
+        );
+        var.extend(string_to_u16("Translation"));
+        var.extend(iter::repeat(0).take(aligned_to(var.len(), 4) - var.len()));
+        var.extend(self.vars.iter().flat_map(|var| var.as_bytes()));
+        var.extend(iter::repeat(0).take(aligned_to(var.len(), 4) - var.len()));
+
+        let mut var_info = Vec::new();
+        var_info.extend(
+            VersionHeader {
+                length:       (aligned_to(6 + "VarFileInfo".len() * 2 + 2, 4) + var.len()) as u16,
+                value_length: 0,
+                type_:        1,
+            }
+            .as_bytes(),
+        );
+        var_info.extend(string_to_u16("VarFileInfo"));
+        var_info.extend(iter::repeat(0).take(aligned_to(var_info.len(), 4) - var_info.len()));
+        var_info.extend(var);
+
+        data.extend(
+            VersionHeader {
+                length:       (aligned_to(
+                    aligned_to(6 + "VS_VERSION_INFO".len() * 2 + 2, 4) + size_of::<FixedFileInfo>(),
+                    4,
+                ) + string_info.len()
+                    + var_info.len()) as u16,
+                value_length: size_of::<FixedFileInfo>() as u16,
+                type_:        0,
+            }
+            .as_bytes(),
+        );
+        data.extend(string_to_u16("VS_VERSION_INFO"));
+        data.extend(iter::repeat(0).take(aligned_to(data.len(), 4) - data.len()));
+        data.extend(self.info.as_bytes());
+        data.extend(iter::repeat(0).take(aligned_to(data.len(), 4) - data.len()));
+        data.extend(string_info);
+        data.extend(var_info);
+
+        data
     }
 }

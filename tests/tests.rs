@@ -458,3 +458,80 @@ fn set_icon() {
         panic!("resource icon group directory is not a table");
     }
 }
+
+#[test]
+fn parse_version_info() {
+    init_logger();
+
+    let data_large = std::fs::read(BINARY_PATH_LARGE).unwrap();
+    let image_large = Image::parse(&data_large[..]).unwrap();
+
+    let target_resource_directory = image_large.resource_directory().cloned().unwrap_or_default();
+
+    let version_info = target_resource_directory.get_version_info();
+    assert!(version_info.is_ok(), "version info successfully parsed");
+    let version_info = version_info.unwrap();
+    assert!(version_info.is_some(), "version info is present");
+}
+
+
+#[test]
+fn build_version_info() {
+    init_logger();
+
+    let data_large = std::fs::read(BINARY_PATH_LARGE).unwrap();
+    let image_large = Image::parse(&data_large[..]).unwrap();
+
+    let target_resource_directory = image_large.resource_directory().cloned().unwrap_or_default();
+
+    let data = target_resource_directory
+        .root()
+        .get(&ResourceEntryName::ID(16))
+        .unwrap()
+        .as_table()
+        .unwrap()
+        .get(&ResourceEntryName::ID(1))
+        .unwrap();
+
+    let version_info = target_resource_directory.get_version_info().unwrap().unwrap();
+    let data_rebuilt = version_info.build();
+
+    assert_eq!(
+        data.data_size() as usize,
+        data_rebuilt.len(),
+        "built version info size equals computed size"
+    );
+}
+
+#[test]
+fn set_version_info() {
+    init_logger();
+
+    let data_large = std::fs::read(BINARY_PATH_LARGE).unwrap();
+    let image_large = Image::parse(&data_large[..]).unwrap();
+
+    let data_wrappe = std::fs::read(BINARY_PATH_WRAPPE).unwrap();
+    let mut image_wrappe = Image::parse(&data_wrappe[..]).unwrap();
+
+    let source_resource_directory = image_large.resource_directory().cloned().unwrap();
+    let mut target_resource_directory =
+        image_wrappe.resource_directory().cloned().unwrap_or_default();
+
+    let version_info = source_resource_directory.get_version_info().unwrap().unwrap();
+    target_resource_directory.set_version_info(&version_info).unwrap();
+
+    assert!(
+        target_resource_directory.size()
+            > image_wrappe.resource_directory().cloned().unwrap_or_default().size(),
+        "resource directory is larger after modification"
+    );
+
+    image_wrappe.set_resource_directory(target_resource_directory.clone()).unwrap();
+    let version_info_rebuilt =
+        image_wrappe.resource_directory().unwrap().get_version_info().unwrap().unwrap();
+
+    assert_eq!(
+        version_info, version_info_rebuilt,
+        "rebuilt version info is equal to original version info"
+    );
+}
