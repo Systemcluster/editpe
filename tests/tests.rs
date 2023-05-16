@@ -535,3 +535,38 @@ fn set_version_info() {
         "rebuilt version info is equal to original version info"
     );
 }
+
+#[test]
+fn get_manifest() {
+    init_logger();
+
+    let data_large = std::fs::read(BINARY_PATH_LARGE).unwrap();
+    let image_large = Image::parse(&data_large[..]).unwrap();
+
+    let target_resource_directory = image_large.resource_directory().cloned().unwrap_or_default();
+
+    let manifest = target_resource_directory.get_manifest();
+    assert!(manifest.is_ok(), "manifest successfully parsed");
+    let manifest = manifest.unwrap();
+    assert!(manifest.is_some(), "manifest is present");
+}
+
+#[test]
+fn set_manifest() {
+    init_logger();
+
+    let data_large = std::fs::read(BINARY_PATH_LARGE).unwrap();
+    let mut image_large = Image::parse(&data_large[..]).unwrap();
+
+    let mut target_resource_directory =
+        image_large.resource_directory().cloned().unwrap_or_default();
+
+    let manifest = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>";
+    target_resource_directory.set_manifest(manifest).unwrap();
+    image_large.set_resource_directory(target_resource_directory.clone()).unwrap();
+
+    let manifest_rebuilt =
+        image_large.resource_directory().unwrap().get_manifest().unwrap().unwrap();
+
+    assert_eq!(manifest, manifest_rebuilt, "rebuilt manifest is equal to original manifest");
+}

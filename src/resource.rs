@@ -532,6 +532,168 @@ impl ResourceDirectory {
         Ok(())
     }
 
+    /// Get the manifest of the executable.
+    ///
+    /// # Returns
+    /// Returns `None` if no manifest exists.
+    /// Returns an error if the manifest resource directory is invalid.
+    pub fn get_manifest(&self) -> Result<Option<String>, ResourceError> {
+        if self.root.entries.is_empty() {
+            return Ok(None);
+        }
+
+        // find the manifest table
+        let manifest_table = self.root.get(ResourceEntryName::ID(RT_MANIFEST as u32));
+        let manifest_table = match manifest_table {
+            Some(ResourceEntry::Table(t)) => t,
+            Some(_) => {
+                return Err(ResourceError::InvalidTable(
+                    "manifest table is not a table".to_string(),
+                ));
+            }
+            _ => return Ok(None),
+        };
+        if manifest_table.entries.is_empty() {
+            return Ok(None);
+        }
+
+        // find the main manifest directory table
+        let inner_table = manifest_table.entries.first().map(|(_, v)| v);
+        let inner_table = match inner_table {
+            Some(ResourceEntry::Table(t)) => t,
+            Some(_) => {
+                return Err(ResourceError::InvalidTable(
+                    "inner manifest table is not a table".to_string(),
+                ));
+            }
+            None => return Ok(None),
+        };
+        if inner_table.entries.is_empty() {
+            return Ok(None);
+        }
+
+        // find the main manifest directory
+        let manifest_directory_entry = inner_table
+            .entries
+            .iter()
+            .find(|(name, _)| **name == ResourceEntryName::ID(LANGUAGE_ID_EN_US as u32))
+            .or_else(|| inner_table.entries.first())
+            .map(|(_, v)| v)
+            .unwrap();
+        if manifest_directory_entry.is_table() {
+            return Err(ResourceError::InvalidTable(
+                "manifest table entry is not data".to_string(),
+            ));
+        }
+        let manifest_directory_entry = manifest_directory_entry.as_data().unwrap();
+
+        Ok(Some(String::from_utf8_lossy(&manifest_directory_entry.data).to_string()))
+    }
+
+    /// Set the manifest of the executable.
+    ///
+    /// This will overwrite the existing manifest.
+    ///
+    /// # Returns
+    /// Returns an error if the resource table structure is not well-formed.
+    pub fn set_manifest(&mut self, manifest: &str) -> Result<(), ResourceError> {
+        if self.root.entries.is_empty() {
+            return Ok(());
+        }
+
+        if self.root.get(ResourceEntryName::ID(RT_MANIFEST as u32)).is_none() {
+            self.root.insert(
+                ResourceEntryName::ID(RT_MANIFEST as u32),
+                ResourceEntry::Table(ResourceTable::default()),
+            );
+        }
+        let manifest_table =
+            match self.root.get_mut(ResourceEntryName::ID(RT_MANIFEST as u32)).unwrap() {
+                ResourceEntry::Table(table) => table,
+                ResourceEntry::Data(_) => {
+                    return Err(ResourceError::InvalidTable(
+                        "manifest table is not a table".to_string(),
+                    ));
+                }
+            };
+
+        // find the main manifest directory table
+        let inner_table = manifest_table.entries.first().map(|(_, v)| v);
+        let mut inner_table = match inner_table {
+            Some(ResourceEntry::Table(t)) => t.clone(),
+            Some(_) => {
+                return Err(ResourceError::InvalidTable(
+                    "inner manifest table is not a table".to_string(),
+                ));
+            }
+            None => ResourceTable::default(),
+        };
+
+        inner_table.insert_at(
+            ResourceEntryName::ID(LANGUAGE_ID_EN_US as u32),
+            ResourceEntry::Data(ResourceData {
+                data:     manifest.as_bytes().to_vec().into(),
+                codepage: CODE_PAGE_ID_EN_US as u32,
+                reserved: 0,
+            }),
+            0,
+        );
+        manifest_table.insert_at(ResourceEntryName::ID(1), ResourceEntry::Table(inner_table), 0);
+
+        Ok(())
+    }
+
+    /// Remove the manifest of the executable.
+    ///
+    /// # Returns
+    /// Returns an error if the resource table structure is not well-formed.
+    pub fn remove_manifest(&mut self) -> Result<(), ResourceError> {
+        if self.root.entries.is_empty() {
+            return Ok(());
+        }
+
+        // find the version table
+        let manifest_table = self.root.get_mut(ResourceEntryName::ID(RT_MANIFEST as u32));
+        let manifest_table = match manifest_table {
+            Some(ResourceEntry::Table(t)) => t,
+            Some(_) => {
+                return Err(ResourceError::InvalidTable(
+                    "manifest table is not a table".to_string(),
+                ));
+            }
+            _ => return Ok(()),
+        };
+        if manifest_table.entries.is_empty() {
+            return Ok(());
+        }
+
+        // find the main manifest directory table
+        let inner_table = manifest_table.entries.first_mut().map(|(_, v)| v);
+        let inner_table = match inner_table {
+            Some(ResourceEntry::Table(t)) => t,
+            Some(_) => {
+                return Err(ResourceError::InvalidTable(
+                    "inner manifest table is not a table".to_string(),
+                ));
+            }
+            None => return Ok(()),
+        };
+        if inner_table.entries.is_empty() {
+            return Ok(());
+        }
+
+        // remove the main manifest directory
+        inner_table.remove(inner_table.entries.keys().next().unwrap().clone());
+        if inner_table.entries.is_empty() {
+            manifest_table.remove(manifest_table.entries.keys().next().unwrap().clone());
+        }
+        if manifest_table.entries.is_empty() {
+            self.root.remove(ResourceEntryName::ID(RT_MANIFEST as u32));
+        }
+
+        Ok(())
+    }
+
     /// Returns the virtual address of the resource directory in the source image.
     pub fn virtual_address(&self) -> u32 { self.virtual_address }
 
