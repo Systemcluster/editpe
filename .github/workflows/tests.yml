@@ -1,0 +1,118 @@
+name: Tests & Checks
+
+on:
+  pull_request:
+    paths-ignore:
+      - ".github/**"
+      - "**/*.md"
+  push:
+    paths-ignore:
+      - ".github/**"
+      - "**/*.md"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  checks: write
+  statuses: write
+
+jobs:
+
+  checks:
+
+    name: Checks
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
+          - macos-latest
+        toolchain:
+          - stable
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          show-progress: false
+
+      - name: Set up Rust toolchain
+        uses: Systemcluster/actions@setup-rust-v0
+        with:
+          channel: ${{ matrix.toolchain }}
+          components: clippy
+          cache-key-job: true
+
+      - name: Check build
+        run: cargo check --workspace --all-features
+
+      - name: Check clippy
+        run: cargo clippy --workspace --all-features
+
+  tests:
+
+    name: Tests
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
+          - macos-latest
+        toolchain:
+          - stable
+          - beta
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          show-progress: false
+
+      - name: Set up Rust toolchain
+        uses: Systemcluster/actions@setup-rust-v0
+        with:
+          channel: ${{ matrix.toolchain }}
+          cache-key-job: true
+
+      - name: Run tests
+        run: cargo test --workspace --all-features
+
+  formatting:
+
+    name: Formatting
+    runs-on: ${{ matrix.os }}
+
+    if: github.event_name == 'pull_request'
+
+    strategy:
+      matrix:
+        os:
+          - ubuntu-latest
+        toolchain:
+          - nightly
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          show-progress: false
+
+      - name: Set up Rust toolchain
+        uses: Systemcluster/actions@setup-rust-v0
+        with:
+          channel: ${{ matrix.toolchain }}
+          components: rustfmt
+          cache-key-job: true
+
+      - name: Check formatting
+        uses: mbrobbel/rustfmt-check@master
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}

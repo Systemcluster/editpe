@@ -1,0 +1,55 @@
+name: Publish
+
+on:
+  workflow_run:
+    branches:
+      - main
+    workflows:
+      - Tests & Checks
+    types:
+      completed
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  checks: write
+  statuses: write
+
+jobs:
+
+  publish:
+
+    name: Publish
+    runs-on: ${{ matrix.os }}
+    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
+
+    strategy:
+      matrix:
+        os:
+          - ubuntu-latest
+        toolchain:
+          - stable
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          show-progress: false
+
+      - name: Set up Rust toolchain
+        uses: Systemcluster/actions@setup-rust-v0
+        with:
+          channel: ${{ matrix.toolchain }}
+          cache-key-job: true
+
+      - name: Run tests
+        run: cargo test --workspace --all-features
+
+      - name: Publish
+        uses: Systemcluster/actions@release-crates-v0
+        if: github.ref == 'refs/heads/main' && github.repository_owner == 'Systemcluster'
+        with:
+          crates-token: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          dry-run: ${{ !secrets.CARGO_REGISTRY_TOKEN }}
+          tag-crate: editpe

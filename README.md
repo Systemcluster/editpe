@@ -2,6 +2,7 @@
 
 [![Crates.io](https://img.shields.io/crates/v/editpe)](https://crates.io/crates/editpe)
 [![Docs.rs](https://img.shields.io/docsrs/editpe)](https://docs.rs/editpe)
+[![Tests & Checks](https://img.shields.io/github/actions/workflow/status/Systemcluster/editpe/tests.yml?label=tests%20%26%20checks)](https://github.com/Systemcluster/editpe/actions/workflows/tests.yml)
 
 Resource **edit**or for **p**ortable **e**xecutables.
 
