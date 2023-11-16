@@ -33,10 +33,10 @@ image = ["dep:image"]
 
 [dependencies]
 
-indexmap = { version = "2.0" }
+indexmap = { version = "2.1" }
 log = { version = "0.4" }
 thiserror = { version = "1.0" }
-zerocopy = { version = "0.6" }
+zerocopy = { version = "0.7", features = ["derive"] }
 debug-ignore = { version = "1.0" }
 
 [dependencies.image]

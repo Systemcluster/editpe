@@ -4,28 +4,36 @@
 
 use std::{mem, slice};
 
-use zerocopy::{AsBytes, FromBytes};
+use zerocopy::{AsBytes, FromBytes, FromZeroes};
 
 #[repr(C, packed(1))]
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, FromBytes, AsBytes, Default)]
+#[derive(
+    Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, FromBytes, FromZeroes, AsBytes, Default,
+)]
 pub struct VersionU8 {
     pub major: u8,
     pub minor: u8,
 }
 #[repr(C, packed(2))]
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, FromBytes, AsBytes, Default)]
+#[derive(
+    Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, FromBytes, FromZeroes, AsBytes, Default,
+)]
 pub struct VersionU16 {
     pub major: u16,
     pub minor: u16,
 }
 #[repr(C, packed(4))]
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, FromBytes, AsBytes, Default)]
+#[derive(
+    Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, FromBytes, FromZeroes, AsBytes, Default,
+)]
 pub struct VersionU32 {
     pub major: u32,
     pub minor: u32,
 }
 #[repr(C, packed(2))]
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, FromBytes, AsBytes, Default)]
+#[derive(
+    Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, FromBytes, FromZeroes, AsBytes, Default,
+)]
 pub struct CoffHeader {
     pub machine:                 u16,
     pub number_of_sections:      u16,
@@ -36,7 +44,9 @@ pub struct CoffHeader {
     pub characteristics:         u16,
 }
 #[repr(C, packed(2))]
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, FromBytes, AsBytes, Default)]
+#[derive(
+    Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, FromBytes, FromZeroes, AsBytes, Default,
+)]
 pub struct StandardHeader {
     pub magic:                      u16,
     pub linker_version:             VersionU8,
@@ -47,7 +57,7 @@ pub struct StandardHeader {
     pub base_of_code:               u32,
 }
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, FromBytes, Default)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, FromBytes, FromZeroes, Default)]
 pub struct WindowsHeader<UXX> {
     pub image_base:               UXX,
     pub section_alignment:        u32,
@@ -187,14 +197,18 @@ impl GenericWindowsHeader {
 }
 
 #[repr(C, packed(4))]
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, FromBytes, AsBytes, Default)]
+#[derive(
+    Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, FromBytes, FromZeroes, AsBytes, Default,
+)]
 pub struct ImageDataDirectory {
     pub virtual_address: u32,
     pub size:            u32,
 }
 
 #[repr(C, packed(4))]
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, FromBytes, AsBytes, Default)]
+#[derive(
+    Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, FromBytes, FromZeroes, AsBytes, Default,
+)]
 pub struct SectionHeader {
     pub name:                   u64,
     pub virtual_size:           u32,
@@ -220,7 +234,9 @@ impl SectionHeader {
 }
 
 #[repr(C, packed(2))]
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, FromBytes, AsBytes, Default)]
+#[derive(
+    Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, FromBytes, FromZeroes, AsBytes, Default,
+)]
 pub struct ResourceDirectoryTable {
     pub characteristics:        u32,
     pub time_date_stamp:        u32,
@@ -230,14 +246,18 @@ pub struct ResourceDirectoryTable {
 }
 
 #[repr(C, packed(4))]
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, FromBytes, AsBytes, Default)]
+#[derive(
+    Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, FromBytes, FromZeroes, AsBytes, Default,
+)]
 pub struct ResourceDirectoryEntry {
     pub name_offset_or_integer_id:         u32,
     pub data_entry_or_subdirectory_offset: u32,
 }
 
 #[repr(C, packed(4))]
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, FromBytes, AsBytes, Default)]
+#[derive(
+    Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, FromBytes, FromZeroes, AsBytes, Default,
+)]
 pub struct ResourceDataEntry {
     pub data_rva: u32,
     pub size:     u32,
@@ -246,7 +266,9 @@ pub struct ResourceDataEntry {
 }
 
 #[repr(C, packed(2))]
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, FromBytes, AsBytes, Default)]
+#[derive(
+    Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, FromBytes, FromZeroes, AsBytes, Default,
+)]
 pub struct IconDirectory {
     pub reserved: u16,
     pub type_:    u16,
@@ -254,7 +276,9 @@ pub struct IconDirectory {
 }
 
 #[repr(C, packed(1))]
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, FromBytes, AsBytes, Default)]
+#[derive(
+    Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, FromBytes, FromZeroes, AsBytes, Default,
+)]
 pub struct IconDirectoryEntry {
     pub width:       u8,
     pub height:      u8,
@@ -267,7 +291,7 @@ pub struct IconDirectoryEntry {
 }
 
 #[repr(C, packed(4))]
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, FromBytes, AsBytes)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, FromBytes, FromZeroes, AsBytes)]
 pub struct FixedFileInfo {
     pub signature:       u32,
     pub struct_version:  VersionU16,
@@ -298,7 +322,9 @@ impl Default for FixedFileInfo {
 }
 
 #[repr(C, packed(2))]
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, FromBytes, AsBytes, Default)]
+#[derive(
+    Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, FromBytes, FromZeroes, AsBytes, Default,
+)]
 pub struct VersionHeader {
     pub length:       u16,
     pub value_length: u16,
