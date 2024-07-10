@@ -23,7 +23,7 @@
 //! let mut resources = image.resource_directory().cloned().unwrap_or_default();
 //!
 //! // set the icon in the resource directory
-//! resources.set_icon(&image)?;
+//! resources.set_icon(&icon)?;
 //!
 //! // set the resource directory in the image
 //! image.set_resource_directory(resources)?;
@@ -55,7 +55,11 @@
 //! let target = image.data();
 //! ```
 
-#![cfg_attr(docsrs, feature(doc_auto_cfg))]
+#![cfg_attr(not(feature = "std"), no_std)]
+#![cfg_attr(docsrs, feature(doc_auto_cfg, doc_cfg_hide))]
+#![cfg_attr(docsrs, doc(cfg_hide(doc)))]
+
+extern crate alloc;
 
 pub(crate) mod errors;
 pub(crate) mod image;

@@ -2,20 +2,21 @@
 //! The resource section contains the resource directory and the resource data.
 //! See <https://learn.microsoft.com/en-us/windows/win32/debug/pe-format#the-rsrc-section> for more information.
 
-use std::{borrow::Borrow, iter, mem::size_of};
+use alloc::{
+    borrow::ToOwned,
+    format,
+    string::{String, ToString},
+    vec::Vec,
+};
+use core::{borrow::Borrow, iter, mem::size_of};
 
+use ahash::RandomState;
 use debug_ignore::DebugIgnore;
 use indexmap::{IndexMap, IndexSet};
 use log::{error, trace, warn};
 use zerocopy::AsBytes;
 
-#[cfg(feature = "image")]
-use image::{imageops::FilterType::Lanczos3, io::Reader as ImageReader, ImageOutputFormat};
-#[cfg(feature = "image")]
-use std::io::Cursor;
-
 use crate::{constants::*, errors::*, types::*, util::*};
-
 
 /// Portable executable resource directory.
 #[derive(Debug, Clone, Eq, PartialEq, Default)]
@@ -152,6 +153,9 @@ impl ResourceDirectory {
     /// # Returns
     /// Returns an error if the new icon not a valid image or the resource table structure is not well-formed.
     pub fn set_icon<T: AsRef<[u8]>>(&mut self, icon: T) -> Result<(), ResourceError> {
+        use image::{imageops::FilterType::Lanczos3, ImageFormat, ImageReader};
+        use std::io::Cursor;
+
         let icon = icon.as_ref();
         let icon = ImageReader::new(Cursor::new(icon)).with_guessed_format()?.decode()?;
 
@@ -194,7 +198,7 @@ impl ResourceDirectory {
                         let mut data = Vec::new();
                         icon.resize_exact(size, size, Lanczos3)
                             .to_rgba8()
-                            .write_to(&mut Cursor::new(&mut data), ImageOutputFormat::Ico)?;
+                            .write_to(&mut Cursor::new(&mut data), ImageFormat::Ico)?;
                         let mut entry = read::<IconDirectoryEntry>(&data[6..20])?;
                         entry.id = id as u16;
                         icon_directory_entries.push(entry);
@@ -312,7 +316,7 @@ impl ResourceDirectory {
         let icon_directory = read::<IconDirectory>(&icon_directory_entry.data)?;
 
         // get a list of all icons in the main icon directory for removal
-        let mut icons_to_remove = IndexSet::new();
+        let mut icons_to_remove = IndexSet::with_hasher(RandomState::default());
         for i in 0..icon_directory.count {
             let icon_directory_entry = read::<IconDirectoryEntry>(
                 &icon_directory_entry.data[6 + i as usize * size_of::<IconDirectoryEntry>()..],
@@ -346,14 +350,14 @@ impl ResourceDirectory {
                         [6 + i as usize * size_of::<IconDirectoryEntry>()..],
                 )?;
                 let icon_id = icon_directory_entry.id;
-                icons_to_remove.remove(&icon_id);
+                icons_to_remove.swap_remove(&icon_id);
             }
         }
 
         // remove the main icon directory table
         group_table.remove(&icon_directory_name);
         if group_table.entries.is_empty() {
-            self.root.remove(&ResourceEntryName::ID(RT_GROUP_ICON as u32));
+            self.root.remove(ResourceEntryName::ID(RT_GROUP_ICON as u32));
         }
 
         // find the main icon table
@@ -369,7 +373,7 @@ impl ResourceDirectory {
 
         // remove the icons from the icon table
         for icon_id in icons_to_remove {
-            icon_table.remove(&ResourceEntryName::ID(icon_id as u32));
+            icon_table.remove(ResourceEntryName::ID(icon_id as u32));
         }
 
         Ok(())
@@ -723,7 +727,7 @@ enum TableData {
 #[derive(Debug, Clone, Eq, PartialEq, Default)]
 pub struct ResourceTable {
     pub(crate) data:    ResourceDirectoryTable,
-    pub(crate) entries: IndexMap<ResourceEntryName, ResourceEntry>,
+    pub(crate) entries: IndexMap<ResourceEntryName, ResourceEntry, RandomState>,
 }
 impl ResourceTable {
     fn parse(
@@ -733,7 +737,7 @@ impl ResourceTable {
         let resource_table = read::<ResourceDirectoryTable>(&image[table_offset as usize..])?;
         trace!("{} {:#x?}", "--".repeat(level + 1), resource_table);
 
-        let mut entries = IndexMap::new();
+        let mut entries = IndexMap::default();
 
         let mut entry_offset = table_offset + 16;
         for _ in 0..(resource_table.number_of_name_entries + resource_table.number_of_id_entries) {
@@ -989,7 +993,7 @@ impl ResourceTable {
     /// The removed entry.
     pub fn remove<N: Borrow<ResourceEntryName>>(&mut self, name: N) -> Option<ResourceEntry> {
         let name = name.borrow();
-        if let Some(entry) = self.entries.remove(name) {
+        if let Some(entry) = self.entries.swap_remove(name) {
             if name.string_size() > 0 {
                 self.data.number_of_name_entries -= 1;
             } else {
@@ -1191,7 +1195,7 @@ impl ResourceEntryName {
                 let mut string = String::with_capacity(length);
                 for i in 0..length {
                     let c = read::<u16>(&data[i * 2..]).unwrap() as u32;
-                    string.push(std::char::from_u32(c).unwrap());
+                    string.push(core::char::from_u32(c).unwrap());
                 }
                 Some(string)
             }
@@ -1220,10 +1224,12 @@ impl ResourceEntryName {
     }
 }
 
+/// Version string table.
+/// This is an entry in the version info resource.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct VersionStringTable {
     pub key:     String,
-    pub strings: IndexMap<String, String>,
+    pub strings: IndexMap<String, String, RandomState>,
 }
 
 /// Version info resource.
@@ -1327,7 +1333,7 @@ impl VersionInfo {
                         let mut string_offset = strings_offset;
                         let mut string_table = VersionStringTable {
                             key:     string_table_key,
-                            strings: IndexMap::new(),
+                            strings: IndexMap::default(),
                         };
 
                         while string_offset < string_table_end {

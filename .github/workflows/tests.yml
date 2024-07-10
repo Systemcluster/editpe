@@ -53,6 +53,9 @@ jobs:
       - name: Check clippy
         run: cargo clippy --workspace --all-features
 
+      - name: Check no-default-features
+        run: cargo check --no-default-features
+
   tests:
 
     name: Tests

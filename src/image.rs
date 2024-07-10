@@ -2,8 +2,9 @@
 //!
 //! See <https://learn.microsoft.com/en-us/windows/win32/debug/pe-format> for more information.
 
-use std::borrow::Cow;
+use alloc::{borrow::Cow, string::ToString, vec::Vec};
 
+use ahash::RandomState;
 use indexmap::IndexMap;
 use log::{debug, error, info, warn};
 use zerocopy::AsBytes;
@@ -43,7 +44,7 @@ pub struct Image<'a> {
     pub(crate) coff_header:           CoffHeader,
     pub(crate) standard_header:       StandardHeader,
     pub(crate) windows_header:        GenericWindowsHeader,
-    pub(crate) header_data_directory: IndexMap<DataDirectoryType, ImageDataDirectory>,
+    pub(crate) header_data_directory: IndexMap<DataDirectoryType, ImageDataDirectory, RandomState>,
     pub(crate) section_table:         Vec<SectionHeader>,
 
     pub(crate) resource_directory: Option<ResourceDirectory>,
@@ -142,7 +143,8 @@ impl<'a> Image<'a> {
         }
 
         debug!("optional_header_dd_offset: {:#x?}", optional_header_dd_offset,);
-        let mut header_data_directory = IndexMap::<DataDirectoryType, ImageDataDirectory>::new();
+        let mut header_data_directory =
+            IndexMap::<DataDirectoryType, ImageDataDirectory, _>::with_hasher(RandomState::new());
         use DataDirectoryType::*;
         for (index, &header) in [
             ExportTable,

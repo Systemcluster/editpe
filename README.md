@@ -10,8 +10,8 @@ Enables cross-platform parsing and modification of Windows executables and their
 
 ## Features
 
-* Parsing and introspection of portable executables
-* Resource editing and icon replacement
+* Parsing and modification of portable executables
+* Resource editing including icons, manifests, version info and more
 * Resource transfer between files
 
 Compared to other resource editors like [rcedit](https://github.com/electron/rcedit), editpe takes great care to keep the modified executable in a valid state. It does this by parsing and rebuilding the complete resource directory as well as all file and section headers, keeping existing sections intact, and leaving any additional data at the end of the file in place.
@@ -24,7 +24,7 @@ Compared to other resource editors like [rcedit](https://github.com/electron/rce
 
 See the [tests](./tests/tests.rs) for additional usage examples.
 
-#### Example: Icon replacement
+#### Example: Adding an icon to an executable
 
 ```rust
 use editpe::Image;
@@ -39,7 +39,7 @@ let mut image = Image::parse(&data)?;
 let mut resources = image.resource_directory().cloned().unwrap_or_default();
 
 // set the icon in the resource directory
-resources.set_icon(&image)?;
+resources.set_icon(&icon)?;
 
 // set the resource directory in the image
 image.set_resource_directory(resources)?;
