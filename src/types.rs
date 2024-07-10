@@ -2,7 +2,8 @@
 //!
 //! These types are a one-to-one mapping of the data described in <https://docs.microsoft.com/en-us/windows/win32/debug/pe-format>
 
-use std::{mem, slice};
+use alloc::string::{String, ToString};
+use core::{mem, slice};
 
 use zerocopy::{AsBytes, FromBytes, FromZeroes};
 
@@ -225,7 +226,7 @@ pub struct SectionHeader {
 impl SectionHeader {
     pub fn name(&self) -> Option<String> {
         let name = self.name.to_le_bytes();
-        let name = std::str::from_utf8(
+        let name = core::str::from_utf8(
             &name[0..name.iter().position(|&c| c == b'\0').unwrap_or(name.len())],
         )
         .ok();

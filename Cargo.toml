@@ -5,9 +5,10 @@ categories = [
   "development-tools::build-utils",
   "os::windows-apis",
   "command-line-utilities",
+  "no-std",
 ]
-keywords = ["parser", "resource", "windows", "executable", "binary"]
-description = "Resource Editor for Portable Executables"
+keywords = ["parser", "resource", "windows", "pe", "coff"]
+description = "Resource Editor for parsing and modification of Windows Portable Executables and their resources"
 edition = "2021"
 include = [
   "Cargo.toml",
@@ -28,27 +29,35 @@ doctest = false
 
 [features]
 
-default = ["image"]
-image = ["dep:image"]
+default = ["std", "image"]
+std = ["dep:thiserror"]
+image = ["std", "dep:image"]
 
 [dependencies]
 
-indexmap = { version = "2.1" }
+indexmap = { version = "2.4", default-features = false }
 log = { version = "0.4" }
-thiserror = { version = "1.0" }
 zerocopy = { version = "0.7", features = ["derive"] }
 debug-ignore = { version = "1.0" }
+ahash = { version = "0.8", default-features = false, features = ["compile-time-rng"] }
+
+[dependencies.thiserror]
+
+optional = true
+version = "1.0"
 
 [dependencies.image]
 
 optional = true
 default-features = false
 features = ["ico", "jpeg", "png", "tga", "tiff", "webp", "bmp"]
-version = "0.24"
+version = "0.25"
 
 [dev-dependencies]
 
-env_logger = "0.10"
+editpe = { path = ".", features = ["std", "image"] }
+
+env_logger = { version = "0.11" }
 
 [package.metadata.docs.rs]
 

@@ -187,15 +187,11 @@ fn transfer_resource_section_small() {
 
     target_resource_directory.root_mut().insert(
         ResourceEntryName::ID(3),
-        source_resource_directory.root().get(&ResourceEntryName::ID(3)).unwrap().clone(),
+        source_resource_directory.root().get(ResourceEntryName::ID(3)).unwrap().clone(),
     );
     target_resource_directory.root_mut().insert(
         ResourceEntryName::ID(14),
-        source_resource_directory
-            .root()
-            .get(&ResourceEntryName::ID(14))
-            .unwrap()
-            .clone(),
+        source_resource_directory.root().get(ResourceEntryName::ID(14)).unwrap().clone(),
     );
 
     image_large.set_resource_directory(target_resource_directory).unwrap();
@@ -234,11 +230,7 @@ fn transfer_resource_section_large() {
 
     target_resource_directory.root_mut().insert(
         ResourceEntryName::ID(24),
-        source_resource_directory
-            .root()
-            .get(&ResourceEntryName::ID(24))
-            .unwrap()
-            .clone(),
+        source_resource_directory.root().get(ResourceEntryName::ID(24)).unwrap().clone(),
     );
     image_small.set_resource_directory(target_resource_directory.clone()).unwrap();
 
@@ -280,23 +272,15 @@ fn transfer_resource_section_from_upx() {
 
     target_resource_directory.root_mut().insert(
         ResourceEntryName::ID(3),
-        source_resource_directory.root().get(&ResourceEntryName::ID(3)).unwrap().clone(),
+        source_resource_directory.root().get(ResourceEntryName::ID(3)).unwrap().clone(),
     );
     target_resource_directory.root_mut().insert(
         ResourceEntryName::ID(14),
-        source_resource_directory
-            .root()
-            .get(&ResourceEntryName::ID(14))
-            .unwrap()
-            .clone(),
+        source_resource_directory.root().get(ResourceEntryName::ID(14)).unwrap().clone(),
     );
     target_resource_directory.root_mut().insert(
         ResourceEntryName::ID(24),
-        source_resource_directory
-            .root()
-            .get(&ResourceEntryName::ID(24))
-            .unwrap()
-            .clone(),
+        source_resource_directory.root().get(ResourceEntryName::ID(24)).unwrap().clone(),
     );
     image_small.set_resource_directory(target_resource_directory.clone()).unwrap();
 
@@ -323,23 +307,15 @@ fn transfer_resource_section_to_wrappe() {
 
     target_resource_directory.root_mut().insert(
         ResourceEntryName::ID(3),
-        source_resource_directory.root().get(&ResourceEntryName::ID(3)).unwrap().clone(),
+        source_resource_directory.root().get(ResourceEntryName::ID(3)).unwrap().clone(),
     );
     target_resource_directory.root_mut().insert(
         ResourceEntryName::ID(14),
-        source_resource_directory
-            .root()
-            .get(&ResourceEntryName::ID(14))
-            .unwrap()
-            .clone(),
+        source_resource_directory.root().get(ResourceEntryName::ID(14)).unwrap().clone(),
     );
     target_resource_directory.root_mut().insert(
         ResourceEntryName::ID(24),
-        source_resource_directory
-            .root()
-            .get(&ResourceEntryName::ID(24))
-            .unwrap()
-            .clone(),
+        source_resource_directory.root().get(ResourceEntryName::ID(24)).unwrap().clone(),
     );
     assert!(
         target_resource_directory.size() > 0,
@@ -486,11 +462,11 @@ fn build_version_info() {
 
     let data = target_resource_directory
         .root()
-        .get(&ResourceEntryName::ID(16))
+        .get(ResourceEntryName::ID(16))
         .unwrap()
         .as_table()
         .unwrap()
-        .get(&ResourceEntryName::ID(1))
+        .get(ResourceEntryName::ID(1))
         .unwrap();
 
     let version_info = target_resource_directory.get_version_info().unwrap().unwrap();
