@@ -16,6 +16,70 @@ use indexmap::{IndexMap, IndexSet};
 use log::{error, trace, warn};
 use zerocopy::AsBytes;
 
+#[cfg(feature = "images")]
+pub use image::DynamicImage;
+
+/// Trait for data types that can be converted to icon data.
+///
+/// This trait is implemented for `&[u8]`, `Vec<u8>`, and for `DynamicImage` when the `images` feature is enabled.
+pub trait ToIcon {
+    fn icons(&self) -> Result<Vec<Vec<u8>>, ResourceError>;
+}
+impl ToIcon for &[u8] {
+    fn icons(&self) -> Result<Vec<Vec<u8>>, ResourceError> {
+        if self.len() < 22 {
+            return Err(ResourceError::InvalidBytes("icon data is too small".into()));
+        }
+        let directory = read::<IconDirectory>(&self[0..6])?;
+        if directory.type_ != 1 {
+            return Err(ResourceError::InvalidBytes("icon data is not an icon".into()));
+        }
+        if directory.count < 1 {
+            return Err(ResourceError::InvalidBytes("icon data has no images".into()));
+        }
+        let mut icons = Vec::with_capacity(directory.count as usize);
+        for i in 0..directory.count as usize {
+            if self.len() < 6 + i * 16 + 16 {
+                return Err(ResourceError::InvalidBytes("icon data is too small".into()));
+            }
+            let size = read::<u32>(&self[6..][i * 16 + 8..])? as usize;
+            let offset = read::<u32>(&self[6..][i * 16 + 12..])? as usize;
+            if offset + size > self.len() {
+                return Err(ResourceError::InvalidBytes("icon data is truncated".into()));
+            }
+            let mut data = Vec::new();
+            data.extend(&self[offset..offset + size]);
+            icons.push(data);
+        }
+        Ok(icons)
+    }
+}
+impl ToIcon for Vec<u8> {
+    fn icons(&self) -> Result<Vec<Vec<u8>>, ResourceError> { self.as_slice().icons() }
+}
+#[cfg(feature = "images")]
+impl ToIcon for &DynamicImage {
+    fn icons(&self) -> Result<Vec<Vec<u8>>, ResourceError> {
+        use image::{imageops::FilterType::Lanczos3, ImageFormat};
+        use std::io::Cursor;
+        const RESOLUTIONS: &[u32] = &[256, 128, 48, 32, 24, 16];
+        RESOLUTIONS
+            .iter()
+            .map(|&size| {
+                let mut data = Vec::new();
+                self.resize_exact(size, size, Lanczos3)
+                    .to_rgba8()
+                    .write_to(&mut Cursor::new(&mut data), ImageFormat::Ico)?;
+                Ok(data.split_off(22))
+            })
+            .collect::<Result<Vec<Vec<u8>>, ResourceError>>()
+    }
+}
+#[cfg(feature = "images")]
+impl ToIcon for DynamicImage {
+    fn icons(&self) -> Result<Vec<Vec<u8>>, ResourceError> { (&self).icons() }
+}
+
 use crate::{constants::*, errors::*, types::*, util::*};
 
 /// Portable executable resource directory.
@@ -44,14 +108,14 @@ impl ResourceDirectory {
         })
     }
 
-    /// Get the icon of the executable.
+    /// Get the main icon of the executable.
     /// The icon will be the first icon in the `MAINICON` group icon directory if it exists.
     /// Otherwise, the first icon in the first group icon directory will be returned.
     ///
     /// # Returns
     /// Returns `None` if no icon exists.
     /// Returns an error if the resource table structure is not well-formed.
-    pub fn get_icon(&self) -> Result<Option<&[u8]>, ResourceError> {
+    pub fn get_main_icon(&self) -> Result<Option<&[u8]>, ResourceError> {
         if self.root.entries.is_empty() {
             return Ok(None);
         }
@@ -146,23 +210,18 @@ impl ResourceDirectory {
         Ok(Some(icon.data()))
     }
 
-    #[cfg(feature = "image")]
-    /// Set the icon of the executable.
-    /// The icon must be the byte slice of a valid image file.
+    /// Set the main icon of the executable.
+    /// The icon must be the byte slice of a valid icon, or a [`image::DynamicImage`] when the `images` feature is enabled.
+    ///
+    /// When `icon` is a [`image::DynamicImage`], the image is resized to the different icon resolutions.
     ///
     /// This will overwrite the group icon directory with the `MAINICON` name if it exists and keep all other group icon directories intact.
     /// This will not remove any existing icons.
-    /// To remove the existing main icon directory and the icons referenced by, call `remove_icon` before setting a new one.
+    /// To remove the existing main icon directory and the icons referenced by, call [`remove_main_icon`](ResourceDirectory::remove_main_icon) before setting a new one.
     ///
     /// # Returns
     /// Returns an error if the new icon not a valid image or the resource table structure is not well-formed.
-    pub fn set_icon<T: AsRef<[u8]>>(&mut self, icon: T) -> Result<(), ResourceError> {
-        use image::{imageops::FilterType::Lanczos3, ImageFormat, ImageReader};
-        use std::io::Cursor;
-
-        let icon = icon.as_ref();
-        let icon = ImageReader::new(Cursor::new(icon)).with_guessed_format()?.decode()?;
-
+    pub fn set_main_icon<T: ToIcon>(&mut self, icon: T) -> Result<(), ResourceError> {
         // find the main icon table
         if self.root.get(ResourceEntryName::ID(RT_ICON as u32)).is_none() {
             self.root.insert(
@@ -189,24 +248,22 @@ impl ResourceDirectory {
             .unwrap_or(0)
             + 1;
 
-        // add the icon to the icon table
+        // read the icon and resize it to the different resolutions
+        let icons = icon.icons()?;
+
+        // add the icons to the icon table
         let mut icon_directory_entries = Vec::new();
-        let resolutions = [256, 128, 48, 32, 24, 16];
-        for (i, &size) in resolutions.iter().enumerate() {
+        for (i, icon) in icons.iter().enumerate() {
             let id = first_free_icon_id + i as u32;
             let mut inner_table = ResourceTable::default();
             inner_table.insert(
                 ResourceEntryName::ID(LANGUAGE_ID_EN_US as u32),
                 ResourceEntry::Data(ResourceData {
                     data:     {
-                        let mut data = Vec::new();
-                        icon.resize_exact(size, size, Lanczos3)
-                            .to_rgba8()
-                            .write_to(&mut Cursor::new(&mut data), ImageFormat::Ico)?;
-                        let mut entry = read::<IconDirectoryEntry>(&data[6..20])?;
+                        let mut entry = read::<IconDirectoryEntry>(&icon[6..20])?;
                         entry.id = id as u16;
                         icon_directory_entries.push(entry);
-                        data[22..].to_owned().into()
+                        icon.to_owned().into()
                     },
                     codepage: CODE_PAGE_ID_EN_US as u32,
                     reserved: 0,
@@ -263,40 +320,47 @@ impl ResourceDirectory {
         Ok(())
     }
 
-    #[cfg(feature = "image")]
-    /// Set the icon of the executable from a file.
+    #[cfg(feature = "std")]
+    /// Set the main icon of the executable from a file.
     /// The file must contain a valid image.
+    /// The image is resized to the different icon resolutions when the `images` feature is enabled.
     ///
-    /// See [`set_icon`](ResourceDirectory::set_icon) for more information.
+    /// See [`set_main_icon`](ResourceDirectory::set_main_icon) for more information.
     ///
     /// # Returns
     /// Returns an error if the file is not a valid image or the resource table structure is not well-formed.
-    pub fn set_icon_file(&mut self, path: &str) -> Result<(), ResourceError> {
+    pub fn set_main_icon_file(&mut self, path: &str) -> Result<(), ResourceError> {
+        #[cfg(feature = "images")]
+        let icon = image::ImageReader::open(path)?.decode()?;
+        #[cfg(not(feature = "images"))]
         let icon = std::fs::read(path)?;
-        self.set_icon(icon)
+        self.set_main_icon(icon)
     }
 
-    #[cfg(feature = "image")]
-    /// Set the icon of the executable from a reader.
+    #[cfg(feature = "std")]
+    /// Set the main icon of the executable from a reader.
     /// The reader must contain a valid image.
+    /// The image is resized to the different icon resolutions when the `images` feature is enabled.
     ///
-    /// See [`set_icon`](ResourceDirectory::set_icon) for more information.
+    /// See [`set_main_icon`](ResourceDirectory::set_main_icon) for more information.
     ///
     /// # Returns
     /// Returns an error if the reader does not contain a valid image or the resource table structure is not well-formed.
-    pub fn set_icon_reader<R: std::io::Read>(
+    pub fn set_main_icon_reader<R: std::io::Read>(
         &mut self, reader: &mut R,
     ) -> Result<(), ResourceError> {
         let mut icon = Vec::new();
         reader.read_to_end(&mut icon)?;
-        self.set_icon(icon)
+        #[cfg(feature = "images")]
+        let icon = image::load_from_memory(&icon)?;
+        self.set_main_icon(icon)
     }
 
     /// Remove the main icon directory and all icons uniquely referenced by it.
     ///
     /// # Returns
     /// Returns an error if the icon resource directory is invalid.
-    pub fn remove_icon(&mut self) -> Result<(), ResourceError> {
+    pub fn remove_main_icon(&mut self) -> Result<(), ResourceError> {
         if self.root.entries.is_empty() {
             return Ok(());
         }

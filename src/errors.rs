@@ -3,9 +3,9 @@
 use alloc::string::{String, ToString};
 use core::str::Utf8Error;
 
-#[cfg(feature = "image")]
+#[cfg(feature = "images")]
 use image::ImageError;
-#[cfg(feature = "image")]
+#[cfg(feature = "images")]
 use std::io::Error as IOError;
 
 /// Error that can occur when reading and parsing bytes.
@@ -13,6 +13,12 @@ use std::io::Error as IOError;
 #[cfg_attr(feature = "std", derive(thiserror::Error))]
 #[cfg_attr(feature = "std", error("{0}"))]
 pub struct ReadError(pub String);
+impl From<&str> for ReadError {
+    fn from(error: &str) -> Self { ReadError(error.to_string()) }
+}
+impl From<String> for ReadError {
+    fn from(error: String) -> Self { ReadError(error) }
+}
 
 /// Errors that can occur when reading a PE image.
 #[derive(Debug)]
@@ -68,7 +74,7 @@ pub enum ResourceError {
     InvalidTable(String),
     #[cfg_attr(feature = "std", error("invalid bytes: {0}"))]
     InvalidBytes(ReadError),
-    #[cfg(feature = "image")]
+    #[cfg(feature = "images")]
     #[error("invalid icon: {0}")]
     InvalidIconResource(ImageError),
     #[cfg(feature = "std")]
@@ -78,7 +84,7 @@ pub enum ResourceError {
 impl From<ReadError> for ResourceError {
     fn from(error: ReadError) -> Self { ResourceError::InvalidBytes(error) }
 }
-#[cfg(feature = "image")]
+#[cfg(feature = "images")]
 impl From<ImageError> for ResourceError {
     fn from(error: ImageError) -> Self { ResourceError::InvalidIconResource(error) }
 }

@@ -358,7 +358,7 @@ fn remove_icon() {
         image_large.resource_directory().cloned().unwrap_or_default();
 
     let size_before = target_resource_directory.size();
-    target_resource_directory.remove_icon().unwrap();
+    target_resource_directory.remove_main_icon().unwrap();
     let size_after = target_resource_directory.size();
 
     assert!(size_before > size_after, "resource directory is smaller after removing icon");
@@ -382,10 +382,13 @@ fn get_icon() {
 
     let target_resource_directory = image_large.resource_directory().cloned().unwrap_or_default();
 
-    let icon = target_resource_directory.get_icon();
+    let icon = target_resource_directory.get_main_icon();
     assert!(icon.is_ok(), "icon successfully parsed");
     let icon = icon.unwrap();
     assert!(icon.is_some(), "icon is present");
+
+    let icon = image::load_from_memory(icon.unwrap());
+    assert!(icon.is_ok(), "icon is valid");
 }
 
 #[test]
@@ -400,13 +403,19 @@ fn set_icon() {
 
     let data_icon = std::fs::read(BINARY_PATH_ICON).unwrap();
 
-    target_resource_directory.set_icon(&data_icon[..]).unwrap();
-
+    let icon = image::load_from_memory(&data_icon[..]).unwrap();
+    target_resource_directory.set_main_icon(icon).unwrap();
     assert!(
         target_resource_directory.size() > 0,
         "resource directory is not empty after modification"
     );
     image_wrappe.set_resource_directory(target_resource_directory.clone()).unwrap();
+
+    target_resource_directory.set_main_icon_file(BINARY_PATH_ICON).unwrap();
+    assert!(
+        target_resource_directory.size() > 0,
+        "resource directory is not empty after modification"
+    );
 
     let data_large_rebuilt = image_wrappe.data();
     assert!(
@@ -433,6 +442,16 @@ fn set_icon() {
     } else {
         panic!("resource icon group directory is not a table");
     }
+
+    let icon = image::load_from_memory(
+        image_large_rebuilt
+            .resource_directory()
+            .unwrap()
+            .get_main_icon()
+            .unwrap()
+            .unwrap(),
+    );
+    assert!(icon.is_ok(), "icon is valid after setting icon");
 }
 
 #[test]
