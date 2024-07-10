@@ -232,6 +232,45 @@ impl<'a> Image<'a> {
         })
     }
 
+    #[cfg(feature = "std")]
+    /// Parse a portable executable image from a file.
+    ///
+    /// # Returns
+    /// Returns the `Image`, or an error if the file could not be read, is not a valid portable executable image or is missing required headers.
+    pub fn parse_file<P: AsRef<std::path::Path>>(path: P) -> Result<Self, ImageReadError> {
+        let data = std::fs::read(path)?;
+        Self::parse(data)
+    }
+
+    #[cfg(feature = "std")]
+    /// Parse a portable executable image from a reader.
+    ///
+    /// # Returns
+    /// Returns the `Image`, or an error if the reader could not be read, is not a valid portable executable image or is missing required headers.
+    pub fn parse_reader<R: std::io::Read>(reader: &mut R) -> Result<Self, ImageReadError> {
+        let mut data = Vec::new();
+        reader.read_to_end(&mut data)?;
+        Self::parse(data)
+    }
+
+    #[cfg(feature = "std")]
+    /// Write the portable executable image to a file.
+    ///
+    /// # Returns
+    /// Returns an error if the file could not be written.
+    pub fn write_file<P: AsRef<std::path::Path>>(&self, path: P) -> Result<(), ImageWriteError> {
+        std::fs::write(path, &self.image).map_err(|e| e.into())
+    }
+
+    #[cfg(feature = "std")]
+    /// Write the portable executable image to a writer.
+    ///
+    /// # Returns
+    /// Returns an error if the writer could not be written.
+    pub fn write_writer<W: std::io::Write>(&self, writer: &mut W) -> Result<(), ImageWriteError> {
+        writer.write_all(&self.image).map_err(|e| e.into())
+    }
+
     /// Set the resource directory of the image.
     ///
     /// This will update the resource data directory and the resource section.
