@@ -22,6 +22,15 @@ Compared to other resource editors like [rcedit](https://github.com/electron/rce
 
 ### Library
 
+Add `editpe` as a dependency. Support for converting and resizing images in other formats when setting icons is provided by the `image` crate.
+
+```toml
+editpe = "0.2"
+image = "*" # optional
+```
+
+The `std` and `images` features are enabled by default and can be disabled for `no-std` support.
+
 See the [tests](./tests/tests.rs) for additional usage examples.
 
 #### Example: Adding an icon to an executable
@@ -34,7 +43,7 @@ let mut image = Image::parse_file("damocles.exe")?;
 // get the resource directory
 let mut resources = image.resource_directory().cloned().unwrap_or_default();
 // set the icon file
-resources.set_icon_file("sword.png")?;
+resources.set_main_icon_file("sword.png")?;
 // set the resource directory in the image
 image.set_resource_directory(resources)?;
 

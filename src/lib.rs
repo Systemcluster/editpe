@@ -20,7 +20,7 @@
 //! // get the resource directory
 //! let mut resources = image.resource_directory().cloned().unwrap_or_default();
 //! // set the icon file
-//! resources.set_icon_file("sword.png")?;
+//! resources.set_main_icon_file("sword.png")?;
 //! // set the resource directory in the image
 //! image.set_resource_directory(resources)?;
 //!
@@ -49,7 +49,7 @@
 //! ### Default features
 //!
 //! - `std`: Enables standard library features, including reading and writing files.
-//! - `image`: Enables image processing features, including setting icon resources. Also enables `std`.
+//! - `images`: Enables support for converting and resizing images in other formats when setting icons. Also enables `std`.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 #![cfg_attr(docsrs, feature(doc_auto_cfg, doc_cfg_hide))]
