@@ -29,45 +29,32 @@ See the [tests](./tests/tests.rs) for additional usage examples.
 ```rust
 use editpe::Image;
 
-let data = std::fs::read(BINARY_PATH)?;
-let icon = std::fs::read(ICON_PATH)?;
-
-// parse the executable image
-let mut image = Image::parse(&data)?;
+let mut image = Image::parse_file("damocles.exe")?;
 
 // get the resource directory
 let mut resources = image.resource_directory().cloned().unwrap_or_default();
-
-// set the icon in the resource directory
-resources.set_icon(&icon)?;
-
+// set the icon file
+resources.set_icon_file("sword.png")?;
 // set the resource directory in the image
 image.set_resource_directory(resources)?;
 
-// build an executable image with all changes applied
-let target = image.data();
+// write an executable image with all changes applied
+image.write_file("damocles.exe");
 ```
 
-#### Example: Resource transfer
+#### Example: Transferring resources between executables
 
 ```rust
 use editpe::Image;
 
-let source = std::fs::read(SOURCE_PATH)?;
-let target = std::fs::read(TARGET_PATH)?;
-
-// parse the source executable image
-let image = Image::parse(&source)?;
-
-// get the source resource directory
+let image = Image::parse_file("damocles.exe")?;
+// get the resource directory from the source
 let resources = image.resource_directory()?;
 
-// parse the target executable image
-let mut image = Image::parse(&target)?;
-
-// set the resource directory in the target image
+let mut image = Image::parse_file("fortuna.exe")?;
+// copy the resource directory to the target
 image.set_resource_directory(resources)?;
 
-// build an executable image with all changes applied
-let target = image.data();
+// write an executable image with all changes applied
+image.write_file("fortuna.exe");
 ```

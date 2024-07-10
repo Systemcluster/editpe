@@ -28,12 +28,19 @@ pub enum ImageReadError {
     MissingSection(String),
     #[cfg_attr(feature = "std", error("invalid section: {0}"))]
     InvalidSection(String),
+    #[cfg(feature = "std")]
+    #[error("io error: {0}")]
+    IOError(IOError),
 }
 impl From<Utf8Error> for ImageReadError {
     fn from(error: Utf8Error) -> Self { ImageReadError::Utf8Error(error) }
 }
 impl From<ReadError> for ImageReadError {
     fn from(error: ReadError) -> Self { ImageReadError::InvalidBytes(error) }
+}
+#[cfg(feature = "std")]
+impl From<IOError> for ImageReadError {
+    fn from(error: IOError) -> Self { ImageReadError::IOError(error) }
 }
 
 /// Errors that can occur when writing a PE image.
@@ -44,6 +51,13 @@ pub enum ImageWriteError {
     NotEnoughSpaceInHeader,
     #[cfg_attr(feature = "std", error("section points outside image: {0} > {1}"))]
     InvalidSectionRange(u64, u64),
+    #[cfg(feature = "std")]
+    #[error("io error: {0}")]
+    IOError(IOError),
+}
+#[cfg(feature = "std")]
+impl From<IOError> for ImageWriteError {
+    fn from(error: IOError) -> Self { ImageWriteError::IOError(error) }
 }
 
 /// Errors that can occur when modifying resource data.

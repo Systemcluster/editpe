@@ -19,6 +19,10 @@ use zerocopy::AsBytes;
 use crate::{constants::*, errors::*, types::*, util::*};
 
 /// Portable executable resource directory.
+///
+/// The resource directory contains the resource table and the resource data entries.
+///
+/// See [`Image::resource_directory`](crate::Image::resource_directory) for retrieving the resource directory from an image.
 #[derive(Debug, Clone, Eq, PartialEq, Default)]
 pub struct ResourceDirectory {
     pub(crate) virtual_address: u32,
@@ -257,6 +261,35 @@ impl ResourceDirectory {
         );
 
         Ok(())
+    }
+
+    #[cfg(feature = "image")]
+    /// Set the icon of the executable from a file.
+    /// The file must contain a valid image.
+    ///
+    /// See [`set_icon`](ResourceDirectory::set_icon) for more information.
+    ///
+    /// # Returns
+    /// Returns an error if the file is not a valid image or the resource table structure is not well-formed.
+    pub fn set_icon_file(&mut self, path: &str) -> Result<(), ResourceError> {
+        let icon = std::fs::read(path)?;
+        self.set_icon(icon)
+    }
+
+    #[cfg(feature = "image")]
+    /// Set the icon of the executable from a reader.
+    /// The reader must contain a valid image.
+    ///
+    /// See [`set_icon`](ResourceDirectory::set_icon) for more information.
+    ///
+    /// # Returns
+    /// Returns an error if the reader does not contain a valid image or the resource table structure is not well-formed.
+    pub fn set_icon_reader<R: std::io::Read>(
+        &mut self, reader: &mut R,
+    ) -> Result<(), ResourceError> {
+        let mut icon = Vec::new();
+        reader.read_to_end(&mut icon)?;
+        self.set_icon(icon)
     }
 
     /// Remove the main icon directory and all icons uniquely referenced by it.
