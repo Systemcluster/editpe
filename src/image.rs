@@ -698,4 +698,22 @@ impl<'a> Image<'a> {
 
     /// Returns all section tables existing in the image.
     pub fn section_table(&self) -> &Vec<SectionHeader> { &self.section_table }
+
+    /// Returns the `Image` with all data cloned into owned memory.
+    pub fn cloned(&self) -> Image<'static> {
+        Image {
+            image:                     self.image.clone().into_owned().into(),
+            pe_dos_magic:              self.pe_dos_magic,
+            pe_signature:              self.pe_signature,
+            coff_header:               self.coff_header,
+            standard_header:           self.standard_header,
+            windows_header:            self.windows_header,
+            header_data_directory:     self.header_data_directory.clone(),
+            section_table:             self.section_table.clone(),
+            resource_directory:        self.resource_directory.clone(),
+            coff_header_offset:        self.coff_header_offset,
+            optional_header_dd_offset: self.optional_header_dd_offset,
+            directories_offset:        self.directories_offset,
+        }
+    }
 }
