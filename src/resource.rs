@@ -1135,11 +1135,20 @@ impl ResourceTable {
 }
 
 /// Raw resource data.
-#[derive(Debug, Clone, Eq, PartialEq, Default)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub struct ResourceData {
     data:     DebugIgnore<Vec<u8>>,
     codepage: u32,
     reserved: u32,
+}
+impl Default for ResourceData {
+    fn default() -> Self {
+        Self {
+            data:     Vec::new().into(),
+            codepage: CODE_PAGE_ID_EN_US as u32,
+            reserved: 0,
+        }
+    }
 }
 impl ResourceData {
     /// Returns the raw data.
@@ -1161,6 +1170,9 @@ impl ResourceData {
 pub enum ResourceEntry {
     Table(ResourceTable),
     Data(ResourceData),
+}
+impl Default for ResourceEntry {
+    fn default() -> Self { Self::Data(ResourceData::default()) }
 }
 impl ResourceEntry {
     /// Returns if the data is a table.
@@ -1258,6 +1270,9 @@ pub enum ResourceEntryName {
     // 2 byte size + data
     Name(Vec<u8>),
 }
+impl Default for ResourceEntryName {
+    fn default() -> Self { Self::ID(LANGUAGE_ID_EN_US as u32) }
+}
 impl ResourceEntryName {
     fn parse(image: &[u8], offset: u32, id: u32) -> Result<Self, ReadError> {
         if id & 0x80000000 != 0 {
@@ -1323,7 +1338,7 @@ impl ResourceEntryName {
 
 /// Version string table.
 /// This is an entry in the version info resource.
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq, Default)]
 pub struct VersionStringTable {
     pub key:     String,
     pub strings: IndexMap<String, String, RandomState>,
