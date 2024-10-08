@@ -7,7 +7,7 @@ use alloc::{borrow::Cow, string::ToString, vec::Vec};
 use ahash::RandomState;
 use indexmap::IndexMap;
 use log::{debug, error, info, warn};
-use zerocopy::AsBytes;
+use zerocopy::IntoBytes;
 
 use crate::{constants::*, errors::*, resource::*, types::*, util::*};
 
@@ -54,7 +54,7 @@ pub struct Image<'a> {
     directories_offset:        u64,
 }
 
-impl<'a> PartialEq for Image<'a> {
+impl PartialEq for Image<'_> {
     fn eq(&self, other: &Self) -> bool {
         self.pe_dos_magic == other.pe_dos_magic
             && self.pe_signature == other.pe_signature
@@ -66,7 +66,7 @@ impl<'a> PartialEq for Image<'a> {
             && self.resource_directory == other.resource_directory
     }
 }
-impl<'a> Eq for Image<'a> {}
+impl Eq for Image<'_> {}
 
 impl<'a> Image<'a> {
     /// Parse a portable executable image from a byte slice.

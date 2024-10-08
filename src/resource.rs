@@ -14,7 +14,7 @@ use ahash::RandomState;
 use debug_ignore::DebugIgnore;
 use indexmap::{IndexMap, IndexSet};
 use log::{error, trace, warn};
-use zerocopy::AsBytes;
+use zerocopy::IntoBytes;
 
 #[cfg(feature = "images")]
 pub use image::DynamicImage;
@@ -60,7 +60,7 @@ impl ToIcon for Vec<u8> {
 #[cfg(feature = "images")]
 impl ToIcon for &DynamicImage {
     fn icons(&self) -> Result<Vec<Vec<u8>>, ResourceError> {
-        use image::{imageops::FilterType::Lanczos3, ImageFormat};
+        use image::{ImageFormat, imageops::FilterType::Lanczos3};
         use std::io::Cursor;
         const RESOLUTIONS: &[u32] = &[256, 128, 48, 32, 24, 16];
         RESOLUTIONS

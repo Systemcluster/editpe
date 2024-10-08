@@ -12,7 +12,9 @@ use zerocopy::FromBytes;
 use crate::ReadError;
 
 pub fn read<T: FromBytes + Copy>(resource: &[u8]) -> Result<T, ReadError> {
-    T::read_from_prefix(resource).ok_or_else(|| ReadError(type_name::<T>().to_string()))
+    T::read_from_prefix(resource)
+        .map_err(|_| ReadError(type_name::<T>().to_string()))
+        .map(|(value, _)| value)
 }
 
 pub fn aligned_to<T: Add<Output = T> + Sub<Output = T> + Rem<Output = T> + Eq + Copy + Default>(
