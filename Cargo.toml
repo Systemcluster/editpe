@@ -19,7 +19,7 @@ license = "BSD-2-Clause"
 name = "editpe"
 readme = "README.md"
 repository = "https://github.com/Systemcluster/editpe"
-version = "0.2.0"
+version = "0.2.1"
 
 [lib]
 
