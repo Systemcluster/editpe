@@ -56,6 +56,9 @@ jobs:
       - name: Check no-default-features
         run: cargo check --no-default-features
 
+      - name: Check no-default-features with std
+        run: cargo check --no-default-features --features std
+
   tests:
 
     name: Tests

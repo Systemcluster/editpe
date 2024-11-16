@@ -5,7 +5,7 @@ use core::str::Utf8Error;
 
 #[cfg(feature = "images")]
 use image::ImageError;
-#[cfg(feature = "images")]
+#[cfg(feature = "std")]
 use std::io::Error as IOError;
 
 /// Error that can occur when reading and parsing bytes.
