@@ -276,7 +276,7 @@ pub struct IconDirectory {
     pub count:    u16,
 }
 
-#[repr(C, packed(1))]
+#[repr(C, packed(2))]
 #[derive(
     Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, FromBytes, IntoBytes, Immutable, Default,
 )]
