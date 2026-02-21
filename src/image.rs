@@ -316,7 +316,7 @@ impl<'a> Image<'a> {
 
         let new_resource_directory_size = resource_directory.size();
         let new_resource_directory_size_aligned =
-            aligned_to(resource_directory.size(), windows_header.section_alignment());
+            aligned_to(resource_directory.size(), windows_header.file_alignment());
         debug!(
             "new resource data size: {:#x?} (aligned: {:#x?})",
             new_resource_directory_size, new_resource_directory_size_aligned
@@ -456,8 +456,8 @@ impl<'a> Image<'a> {
                             );
                             // adjust section size and virtual size header values
                             resource_dd.size = new_resource_directory_size;
-                            old_resource_section.size_of_raw_data = new_resource_directory_size;
-                            old_resource_section.virtual_size = new_resource_directory_size_aligned;
+                            old_resource_section.virtual_size = new_resource_directory_size;
+                            old_resource_section.size_of_raw_data = new_resource_directory_size_aligned;
                         }
                     } else {
                         debug!(
@@ -467,12 +467,10 @@ impl<'a> Image<'a> {
                             resource_directory.build(old_resource_data_directory.virtual_address);
                         resource_dd.size = new_resource_directory_size;
                         // adjust section size and virtual size header values
-                        old_resource_section.size_of_raw_data +=
-                            new_resource_directory_size - old_resource_section.size_of_raw_data;
-                        old_resource_section.virtual_size += aligned_to(
-                            new_resource_directory_size - old_resource_section.size_of_raw_data,
-                            windows_header.section_alignment(),
-                        );
+                        old_resource_section.virtual_size = new_resource_directory_size;
+                        old_resource_section.size_of_raw_data = new_resource_directory_size_aligned;
+                        // pad the data to the size of the raw data
+                        resource_section_data.resize(new_resource_directory_size_aligned as usize, 0);
                     }
                 } else {
                     debug!(
@@ -524,9 +522,9 @@ impl<'a> Image<'a> {
             };
             let new_section = SectionHeader {
                 name: u64::from_le_bytes(".pedata\0".as_bytes().try_into().unwrap()),
-                virtual_size: new_resource_directory_size_aligned,
+                virtual_size: new_resource_directory_size,
                 virtual_address,
-                size_of_raw_data: new_resource_directory_size,
+                size_of_raw_data: new_resource_directory_size_aligned,
                 pointer_to_raw_data,
                 characteristics: IMAGE_SCN_CNT_INITIALIZED_DATA | IMAGE_SCN_MEM_READ,
                 ..SectionHeader::default()
