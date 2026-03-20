@@ -329,7 +329,9 @@ impl<'a> Image<'a> {
 
         let first_section = section_table
             .iter()
-            .filter(|section_header| section_header.size_of_raw_data > 0)
+            .filter(|section_header| {
+                section_header.size_of_raw_data > 0 && section_header.pointer_to_raw_data > 0
+            })
             .min_by_key(|section_header| section_header.pointer_to_raw_data)
             .copied();
         let first_section_start = first_section
@@ -338,7 +340,9 @@ impl<'a> Image<'a> {
 
         let last_section = section_table
             .iter()
-            .filter(|section_header| section_header.size_of_raw_data > 0)
+            .filter(|section_header| {
+                section_header.size_of_raw_data > 0 && section_header.pointer_to_raw_data > 0
+            })
             .max_by_key(|section_header| {
                 section_header.pointer_to_raw_data + section_header.size_of_raw_data
             })
