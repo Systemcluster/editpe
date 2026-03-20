@@ -316,7 +316,7 @@ impl<'a> Image<'a> {
 
         let new_resource_directory_size = resource_directory.size();
         let new_resource_directory_size_aligned =
-            aligned_to(resource_directory.size(), windows_header.file_alignment());
+            aligned_to(new_resource_directory_size, windows_header.file_alignment());
         debug!(
             "new resource data size: {:#x?} (aligned: {:#x?})",
             new_resource_directory_size, new_resource_directory_size_aligned
@@ -392,22 +392,22 @@ impl<'a> Image<'a> {
 
             // check if the existing section is large enough to hold the new resource directory
             // or if it is the last section and can be extended
-            if old_resource_section.size_of_raw_data >= new_resource_directory_size {
+            if old_resource_section.size_of_raw_data >= new_resource_directory_size_aligned {
                 debug!(
                     "existing section size is large enough and can be reused ({:#x?} >= {:#x?})",
-                    old_resource_section.size_of_raw_data, new_resource_directory_size
+                    old_resource_section.size_of_raw_data, new_resource_directory_size_aligned
                 );
                 add_new_section = false;
             } else if is_last_section {
                 debug!(
                     "existing section is the last section and can be extended ({:#x?} < {:#x?})",
-                    old_resource_section.size_of_raw_data, new_resource_directory_size
+                    old_resource_section.size_of_raw_data, new_resource_directory_size_aligned
                 );
                 add_new_section = false;
             } else {
                 debug!(
                     "existing resource section size is too small and followed by other sections ({:#x?} < {:#x?})",
-                    old_resource_section.size_of_raw_data, new_resource_directory_size
+                    old_resource_section.size_of_raw_data, new_resource_directory_size_aligned
                 );
             }
 
@@ -436,7 +436,8 @@ impl<'a> Image<'a> {
                             resource_directory.build(old_resource_data_directory.virtual_address);
 
                         if !is_last_section
-                            && old_resource_section.size_of_raw_data > new_resource_directory_size
+                            && old_resource_section.size_of_raw_data
+                                > new_resource_directory_size_aligned
                         {
                             debug!(
                                 "resource section is not the last section and smaller than the existing section, padding section with existing data"
@@ -449,7 +450,7 @@ impl<'a> Image<'a> {
                                         + old_resource_section.size_of_raw_data as usize)],
                             );
                         } else if old_resource_section.size_of_raw_data
-                            > new_resource_directory_size
+                            > new_resource_directory_size_aligned
                         {
                             debug!(
                                 "resource section is the last section and smaller than the existing section, truncating section"
@@ -457,20 +458,23 @@ impl<'a> Image<'a> {
                             // adjust section size and virtual size header values
                             resource_dd.size = new_resource_directory_size;
                             old_resource_section.virtual_size = new_resource_directory_size;
-                            old_resource_section.size_of_raw_data = new_resource_directory_size_aligned;
+                            old_resource_section.size_of_raw_data =
+                                new_resource_directory_size_aligned;
                         }
+                        resource_section_data
+                            .resize(old_resource_section.size_of_raw_data as usize, 0);
                     } else {
                         debug!(
                             "resource section is the last section and larger than the existing section, expanding section"
                         );
                         resource_section_data =
                             resource_directory.build(old_resource_data_directory.virtual_address);
+                        resource_section_data
+                            .resize(new_resource_directory_size_aligned as usize, 0);
                         resource_dd.size = new_resource_directory_size;
                         // adjust section size and virtual size header values
                         old_resource_section.virtual_size = new_resource_directory_size;
                         old_resource_section.size_of_raw_data = new_resource_directory_size_aligned;
-                        // pad the data to the size of the raw data
-                        resource_section_data.resize(new_resource_directory_size_aligned as usize, 0);
                     }
                 } else {
                     debug!(
@@ -531,6 +535,7 @@ impl<'a> Image<'a> {
             };
             section_table.push(new_section);
             new_section_data = resource_directory.build(virtual_address);
+            new_section_data.resize(new_resource_directory_size_aligned as usize, 0);
 
             coff_header.number_of_sections += 1;
             required_header_space += 40;
