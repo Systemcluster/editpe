@@ -706,10 +706,6 @@ impl ResourceDirectory {
     /// # Returns
     /// Returns an error if the resource table structure is not well-formed.
     pub fn set_manifest(&mut self, manifest: &str) -> Result<(), ResourceError> {
-        if self.root.entries.is_empty() {
-            return Ok(());
-        }
-
         if self.root.get(ResourceEntryName::ID(RT_MANIFEST as u32)).is_none() {
             self.root.insert(
                 ResourceEntryName::ID(RT_MANIFEST as u32),
