@@ -3,7 +3,6 @@
 //! See <https://learn.microsoft.com/en-us/windows/win32/debug/pe-format#the-rsrc-section> for more information.
 
 use alloc::{
-    borrow::ToOwned,
     format,
     string::{String, ToString},
     vec::Vec,
@@ -47,8 +46,11 @@ impl ToIcon for &[u8] {
             if offset + size > self.len() {
                 return Err(ResourceError::InvalidBytes("icon data is truncated".into()));
             }
-            let mut data = Vec::new();
-            data.extend(&self[offset..offset + size]);
+            let mut data = Vec::with_capacity(14 + size);
+            // prepend 12 bytes of ICO directory entry metadata + 2-byte dummy id
+            data.extend_from_slice(&self[6..][i * 16..i * 16 + 12]);
+            data.extend_from_slice(&[0u8; 2]);
+            data.extend_from_slice(&self[offset..offset + size]);
             icons.push(data);
         }
         Ok(icons)
@@ -70,7 +72,12 @@ impl ToIcon for &DynamicImage {
                 self.resize_exact(size, size, Lanczos3)
                     .to_rgba8()
                     .write_to(&mut Cursor::new(&mut data), ImageFormat::Ico)?;
-                Ok(data.split_off(22))
+                // prepend 12 bytes of ICO directory entry metadata + 2-byte dummy id
+                let mut result = Vec::with_capacity(14 + data.len() - 22);
+                result.extend_from_slice(&data[6..18]);
+                result.extend_from_slice(&[0u8; 2]);
+                result.extend_from_slice(&data[22..]);
+                Ok(result)
             })
             .collect::<Result<Vec<Vec<u8>>, ResourceError>>()
     }
@@ -260,10 +267,11 @@ impl ResourceDirectory {
                 ResourceEntryName::ID(LANGUAGE_ID_EN_US as u32),
                 ResourceEntry::Data(ResourceData {
                     data:     {
-                        let mut entry = read::<IconDirectoryEntry>(&icon[6..20])?;
+                        let mut entry = read::<IconDirectoryEntry>(&icon[..14])?;
                         entry.id = id as u16;
+                        entry.bytes = (icon.len() - 14) as u32;
                         icon_directory_entries.push(entry);
-                        icon.to_owned().into()
+                        icon[14..].to_vec().into()
                     },
                     codepage: CODE_PAGE_ID_EN_US as u32,
                     reserved: 0,
