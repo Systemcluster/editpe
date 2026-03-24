@@ -1328,7 +1328,7 @@ impl ResourceEntryName {
         let string = string.as_ref();
         let mut data = Vec::with_capacity(string.len() * 2 + 2);
         data.extend_from_slice(&(string.len() as u16).to_le_bytes());
-        data.extend(string.encode_utf16().flat_map(|c| c.to_le_bytes().to_vec()));
+        data.extend(string.encode_utf16().flat_map(|c| c.to_le_bytes()));
         Self::Name(data)
     }
 

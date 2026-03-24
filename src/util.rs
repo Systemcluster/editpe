@@ -41,7 +41,7 @@ pub fn read_u16_string(data: &[u8]) -> Result<String, ReadError> {
 pub fn string_to_u16<S: AsRef<str>>(string: S) -> Vec<u8> {
     let string = string.as_ref();
     let mut data = Vec::with_capacity(string.len() * 2 + 2);
-    data.extend(string.encode_utf16().flat_map(|c| c.to_le_bytes().to_vec()));
-    data.extend(Vec::from([0, 0]));
+    data.extend(string.encode_utf16().flat_map(|c| c.to_le_bytes()));
+    data.extend([0, 0]);
     data
 }
