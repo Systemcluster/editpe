@@ -7,7 +7,7 @@ use alloc::{
     string::{String, ToString},
     vec::Vec,
 };
-use core::{borrow::Borrow, iter, mem::size_of};
+use core::{borrow::Borrow, cmp::Ordering, iter, mem::size_of};
 
 use ahash::RandomState;
 use debug_ignore::DebugIgnore;
@@ -959,9 +959,24 @@ impl ResourceTable {
         tables_data.push(TableData::Table(self.data));
         *tables_offset += 16;
 
+        // Sort entries as described in <https://learn.microsoft.com/en-us/windows/win32/debug/pe-format#resource-directory-entries>
+        // named entries (case-insensitive) then ID entries (numerical)
+        let mut sorted_keys: Vec<&ResourceEntryName> = self.entries.keys().collect();
+        sorted_keys.sort_by(|a, b| match (a, b) {
+            (ResourceEntryName::Name(_), ResourceEntryName::ID(_)) => Ordering::Less,
+            (ResourceEntryName::ID(_), ResourceEntryName::Name(_)) => Ordering::Greater,
+            (ResourceEntryName::Name(_), ResourceEntryName::Name(_)) => a
+                .to_string()
+                .unwrap()
+                .to_uppercase()
+                .cmp(&b.to_string().unwrap().to_uppercase()),
+            (ResourceEntryName::ID(a), ResourceEntryName::ID(b)) => a.cmp(b),
+        });
+
         let mut next_table_offset = 0u32;
         let mut next_table_sizes = 0u32;
-        for (name, entry) in &self.entries {
+        for name in &sorted_keys {
+            let entry = &self.entries[*name];
             strings_data.extend(name.string_data());
             let name_offset_or_integer_id = if name.string_size() > 0 {
                 *strings_offset | 0x80000000
@@ -1006,7 +1021,8 @@ impl ResourceTable {
         }
         *tables_offset += next_table_offset;
 
-        for (_, entry) in &self.entries {
+        for name in &sorted_keys {
+            let entry = &self.entries[*name];
             match entry {
                 ResourceEntry::Table(table) => {
                     let (t_tables_data, t_strings_data, t_descriptions_data, t_data_data) = table
