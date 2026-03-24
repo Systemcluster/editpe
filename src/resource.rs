@@ -1008,16 +1008,28 @@ impl ResourceTable {
                     tables_data.push(TableData::Entry(entry_data));
                     next_table_offset += 8;
 
-                    data_data.extend(&*data.data);
+                    let mut data_len = data.data.len();
+                    if data_len > u32::MAX as _ {
+                        // TODO (semver): return result
+                        error!(
+                            "resource entry data is larger than {}B and will be truncated (is {}B)",
+                            u32::MAX,
+                            data_len
+                        );
+                        data_len = u32::MAX as _;
+                    }
+                    let data_len = data_len as u32;
+
+                    data_data.extend(&data.data[..data_len as usize]);
                     let description_data = ResourceDataEntry {
                         data_rva: *data_offset + virtual_address,
-                        size:     data.data.len() as u32,
+                        size:     data_len,
                         codepage: data.codepage,
                         reserved: data.reserved,
                     };
                     descriptions_data.push(description_data);
                     *descriptions_offset += 16;
-                    *data_offset += data.data.len() as u32;
+                    *data_offset += data_len;
                 }
             }
         }
