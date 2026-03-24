@@ -840,8 +840,10 @@ impl ResourceTable {
 
         let mut entries = IndexMap::default();
 
+        let num_entries = resource_table.number_of_name_entries as u32
+            + resource_table.number_of_id_entries as u32;
         let mut entry_offset = table_offset + 16;
-        for _ in 0..(resource_table.number_of_name_entries + resource_table.number_of_id_entries) {
+        for _ in 0..num_entries {
             let entry = read::<ResourceDirectoryEntry>(&image[entry_offset as usize..])?;
             trace!("{} {:#x?}", "--".repeat(level + 1), entry);
 
