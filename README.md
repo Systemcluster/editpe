@@ -11,7 +11,7 @@ Enables cross-platform parsing and modification of Windows executables and their
 ## Features
 
 * Parsing and modification of portable executables
-* Resource editing including icons, manifests, version info and more
+* Resource editing including icons, manifests, subsystem, version info and more!
 * Resource transfer between files
 
 Compared to other resource editors like [rcedit](https://github.com/electron/rcedit), editpe takes great care to keep the modified executable in a valid state. It does this by parsing and rebuilding the complete resource directory as well as all file and section headers, keeping existing sections intact, and leaving any additional data at the end of the file in place.
@@ -20,14 +20,13 @@ Compared to other resource editors like [rcedit](https://github.com/electron/rce
 
 ### Library
 
-Add `editpe` as a dependency. Support for converting and resizing images in other formats when setting icons is provided by the `image` crate.
+Add `editpe` as a dependency. The `std` and `images` features are enabled by default and can be disabled for `no-std` support.
 
 ```toml
 editpe = "0.2"
-image = "*" # to support additional icon file types
+image = { version = "*", features = ["png"] } # to support additional icon file types
 ```
 
-The `std` and `images` features are enabled by default and can be disabled for `no-std` support.
 
 #### Examples
 
@@ -50,10 +49,10 @@ image.write_file("damocles.exe");
 
 ```rust
 let source = Image::parse_file("damocles.exe")?;
-let resources = image.resource_directory()?;
+let resources = image.resource_directory().unwrap();
 
 let mut target = Image::parse_file("fortuna.exe")?;
-target.set_resource_directory(resources)?;
+target.set_resource_directory(resources.clone())?;
 target.write_file("fortuna.exe");
 ```
 

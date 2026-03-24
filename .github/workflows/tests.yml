@@ -59,6 +59,28 @@ jobs:
       - name: Check no-default-features with std
         run: cargo check --no-default-features --features std
 
+  docs:
+
+    name: Docs
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          show-progress: false
+
+      - name: Set up Rust toolchain
+        uses: Systemcluster/actions@setup-rust-v0
+        with:
+          channel: nightly
+          cache-key-job: true
+
+      - name: Check docs.rs
+        env:
+          RUSTDOCFLAGS: --cfg docsrs
+        run: cargo doc
+
   tests:
 
     name: Tests
