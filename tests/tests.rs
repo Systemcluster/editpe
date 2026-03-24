@@ -1,4 +1,4 @@
-use editpe::*;
+use editpe::{constants::*, *};
 use std::sync::Once;
 
 static BINARY_PATH_SMALL: &str = "./tests/assets/smallbin.exe";
@@ -564,4 +564,28 @@ fn set_manifest() {
         image_large.resource_directory().unwrap().get_manifest().unwrap().unwrap();
 
     assert_eq!(manifest, manifest_rebuilt, "rebuilt manifest is equal to original manifest");
+}
+
+#[test]
+fn set_subsystem() {
+    init_logger();
+
+    let data_large = std::fs::read(BINARY_PATH_LARGE).unwrap();
+    let mut image_large = Image::parse(&data_large[..]).unwrap();
+
+    image_large.set_subsystem(IMAGE_SUBSYSTEM_NATIVE_WINDOWS);
+
+    let data_large_rebuilt = image_large.data();
+    let image_large_rebuilt = Image::parse(data_large_rebuilt).unwrap();
+
+    assert_eq!(
+        IMAGE_SUBSYSTEM_NATIVE_WINDOWS,
+        image_large_rebuilt.windows_header().subsystem(),
+        "original and rebuilt subsystem equal"
+    );
+    assert_eq!(
+        image_large.data(),
+        image_large_rebuilt.data(),
+        "original and rebuilt data equal"
+    );
 }

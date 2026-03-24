@@ -635,13 +635,15 @@ impl<'a> Image<'a> {
                 header.check_sum = 0;
             }
         }
-        let mut new_image = Vec::with_capacity(self.image.len());
-        new_image.extend_from_slice(&self.image[..self.coff_header_offset as usize]);
-        new_image.extend_from_slice(self.coff_header.as_bytes());
-        new_image.extend_from_slice(self.standard_header.as_bytes());
-        new_image.extend_from_slice(self.windows_header.as_bytes());
-        new_image.extend_from_slice(&self.image[self.optional_header_dd_offset as usize..]);
-        self.image = new_image.into();
+        let image = self.image.to_mut();
+        image[match self.windows_header {
+            GenericWindowsHeader::WindowsHeader32(_) => self.coff_header_offset + 20 + 28,
+            GenericWindowsHeader::WindowsHeader64(_) => self.coff_header_offset + 20 + 24,
+        } as usize..match self.windows_header {
+            GenericWindowsHeader::WindowsHeader32(_) => self.coff_header_offset + 20 + 28 + 68,
+            GenericWindowsHeader::WindowsHeader64(_) => self.coff_header_offset + 20 + 24 + 88,
+        } as usize]
+            .copy_from_slice(self.windows_header.as_bytes());
         previous_subsystem
     }
 
