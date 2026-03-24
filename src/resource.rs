@@ -9,8 +9,8 @@ use alloc::{
 };
 use core::{borrow::Borrow, cmp::Ordering, iter, mem::size_of};
 
-use ahash::RandomState;
 use debug_ignore::DebugIgnore;
+use foldhash::fast::RandomState;
 use indexmap::{IndexMap, IndexSet};
 use log::{error, trace, warn};
 use zerocopy::IntoBytes;

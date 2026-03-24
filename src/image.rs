@@ -4,7 +4,7 @@
 
 use alloc::{borrow::Cow, string::ToString, vec::Vec};
 
-use ahash::RandomState;
+use foldhash::fast::RandomState;
 use indexmap::IndexMap;
 use log::{debug, error, info, warn};
 use zerocopy::IntoBytes;
@@ -144,7 +144,9 @@ impl<'a> Image<'a> {
 
         debug!("optional_header_dd_offset: {:#x?}", optional_header_dd_offset,);
         let mut header_data_directory =
-            IndexMap::<DataDirectoryType, ImageDataDirectory, _>::with_hasher(RandomState::new());
+            IndexMap::<DataDirectoryType, ImageDataDirectory, _>::with_hasher(
+                RandomState::default(),
+            );
         use DataDirectoryType::*;
         for (index, &header) in [
             ExportTable,
