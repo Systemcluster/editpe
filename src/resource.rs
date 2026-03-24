@@ -1327,7 +1327,7 @@ impl ResourceEntryName {
                 let mut string = String::with_capacity(length);
                 for i in 0..length {
                     let c = read::<u16>(&data[i * 2..]).unwrap() as u32;
-                    string.push(core::char::from_u32(c).unwrap());
+                    string.push(char::from_u32(c).unwrap_or(char::REPLACEMENT_CHARACTER));
                 }
                 Some(string)
             }

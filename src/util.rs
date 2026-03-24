@@ -33,7 +33,7 @@ pub fn read_u16_string(data: &[u8]) -> Result<String, ReadError> {
         if c == 0 {
             break;
         }
-        string.push(core::char::from_u32(c as u32).unwrap_or('?'));
+        string.push(char::from_u32(c as u32).unwrap_or(char::REPLACEMENT_CHARACTER));
     }
     Ok(string)
 }
