@@ -1,5 +1,5 @@
-use editpe::{constants::*, *};
-use std::sync::Once;
+use editpe::{constants::*, types::*, *};
+use std::{mem::size_of, sync::Once};
 
 static BINARY_PATH_SMALL: &str = "./tests/assets/smallbin.exe";
 static BINARY_PATH_SMALL_32: &str = "./tests/assets/smallbin-32.exe";
@@ -182,6 +182,48 @@ fn set_pe32_resource_section() {
 
     let new_image = Image::parse(new_data).unwrap();
     assert_eq!(image, new_image, "original and rebuilt PE32 images equal");
+}
+
+#[test]
+fn set_resource_section_with_overflowing_image_size() {
+    init_logger();
+
+    for (virtual_size, description) in [
+        (0x2000_u32, "virtual section extent"),
+        (0x0800_u32, "aligned image size"),
+    ] {
+        let mut data = std::fs::read(BINARY_PATH_SMALL).unwrap();
+        let image = Image::parse(&data[..]).unwrap();
+        let original_image_size = image.windows_header().size_of_image();
+
+        let pe_signature_offset = u32::from_le_bytes(
+            data[PE_PTR_OFFSET as usize..PE_PTR_OFFSET as usize + size_of::<u32>()]
+                .try_into()
+                .unwrap(),
+        ) as usize;
+        let last_section_offset = pe_signature_offset
+            + size_of::<u32>()
+            + size_of::<CoffHeader>()
+            + image.coff_header().size_of_optional_header as usize
+            + (image.coff_header().number_of_sections as usize - 1) * size_of::<SectionHeader>();
+        let virtual_size_offset = last_section_offset + size_of::<u64>();
+        let virtual_address_offset = virtual_size_offset + size_of::<u32>();
+
+        data[virtual_size_offset..virtual_size_offset + size_of::<u32>()]
+            .copy_from_slice(&virtual_size.to_le_bytes());
+        data[virtual_address_offset..virtual_address_offset + size_of::<u32>()]
+            .copy_from_slice(&0xffff_f000_u32.to_le_bytes());
+
+        let mut image = Image::parse(&data[..]).unwrap();
+        let resource_directory = image.resource_directory().cloned().unwrap();
+        image.set_resource_directory(resource_directory).unwrap();
+
+        assert_eq!(
+            image.windows_header().size_of_image(),
+            original_image_size,
+            "original image size is preserved when {description} overflows"
+        );
+    }
 }
 
 #[test]
