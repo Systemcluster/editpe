@@ -251,6 +251,14 @@ fn transfer_resource_section_large() {
     );
     image_small.set_resource_directory(target_resource_directory.clone()).unwrap();
 
+    let section_alignment = image_small.windows_header().section_alignment();
+    let size_of_image = image_small.windows_header().size_of_image();
+    assert_eq!(
+        size_of_image % section_alignment,
+        0,
+        "image size is aligned to section boundaries"
+    );
+
     let data_small_rebuilt = image_small.data();
 
     assert!(

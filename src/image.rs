@@ -565,15 +565,22 @@ impl<'a> Image<'a> {
             return Err(ImageWriteError::NotEnoughSpaceInHeader);
         }
 
+        let size_of_image = section_table
+            .iter()
+            .map(|section| section.virtual_address + section.virtual_size)
+            .max()
+            .map(|size| aligned_to(size, windows_header.section_alignment()))
+            .unwrap_or_else(|| windows_header.size_of_image());
+
         match windows_header {
             GenericWindowsHeader::WindowsHeader32(ref mut header) => {
                 header.number_of_rva_and_sizes = header_data_directory.len() as u32;
-                header.size_of_image += new_section_data.len() as u32;
+                header.size_of_image = size_of_image;
                 header.check_sum = 0;
             }
             GenericWindowsHeader::WindowsHeader64(ref mut header) => {
                 header.number_of_rva_and_sizes = header_data_directory.len() as u32;
-                header.size_of_image += new_section_data.len() as u32;
+                header.size_of_image = size_of_image;
                 header.check_sum = 0;
             }
         }
