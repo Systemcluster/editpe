@@ -2,6 +2,7 @@ use editpe::{constants::*, *};
 use std::sync::Once;
 
 static BINARY_PATH_SMALL: &str = "./tests/assets/smallbin.exe";
+static BINARY_PATH_SMALL_32: &str = "./tests/assets/smallbin-32.exe";
 static BINARY_PATH_LARGE: &str = "./tests/assets/smallbin-large.exe";
 static BINARY_PATH_UPX: &str = "./tests/assets/smallbin-large-upx.exe";
 static BINARY_PATH_WRAPPE: &str = "./tests/assets/smallbin-wrappe.exe";
@@ -165,6 +166,22 @@ fn set_resource_section() {
 
     let new_image = Image::parse(new_data).unwrap();
     assert_eq!(image, new_image, "original and rebuilt images equal");
+}
+
+#[test]
+fn set_pe32_resource_section() {
+    init_logger();
+
+    let data = std::fs::read(BINARY_PATH_SMALL_32).unwrap();
+    let mut image = Image::parse(&data[..]).unwrap();
+    let resource_directory = image.resource_directory().cloned().unwrap();
+    image.set_resource_directory(resource_directory).unwrap();
+
+    let new_data = image.data();
+    assert_eq!(data.len(), new_data.len(), "original and rebuilt PE32 data size equal");
+
+    let new_image = Image::parse(new_data).unwrap();
+    assert_eq!(image, new_image, "original and rebuilt PE32 images equal");
 }
 
 #[test]
