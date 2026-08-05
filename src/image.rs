@@ -567,9 +567,10 @@ impl<'a> Image<'a> {
 
         let size_of_image = section_table
             .iter()
-            .map(|section| section.virtual_address + section.virtual_size)
+            .map(|section| u64::from(section.virtual_address) + u64::from(section.virtual_size))
             .max()
-            .map(|size| aligned_to(size, windows_header.section_alignment()))
+            .map(|size| aligned_to(size, u64::from(windows_header.section_alignment())))
+            .and_then(|size| u32::try_from(size).ok())
             .unwrap_or_else(|| windows_header.size_of_image());
 
         match windows_header {
