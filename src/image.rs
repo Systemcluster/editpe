@@ -3,6 +3,7 @@
 //! See <https://learn.microsoft.com/en-us/windows/win32/debug/pe-format> for more information.
 
 use alloc::{borrow::Cow, string::ToString, vec::Vec};
+use core::mem::size_of;
 
 use foldhash::fast::RandomState;
 use indexmap::IndexMap;
@@ -579,6 +580,14 @@ impl<'a> Image<'a> {
 
         new_image.extend_from_slice(coff_header.as_bytes());
         new_image.extend_from_slice(self.standard_header.as_bytes());
+        if matches!(windows_header, GenericWindowsHeader::WindowsHeader32(_)) {
+            let base_of_data_offset = self.coff_header_offset as usize
+                + size_of::<CoffHeader>()
+                + size_of::<StandardHeader>();
+            new_image.extend_from_slice(
+                &self.image[base_of_data_offset..base_of_data_offset + size_of::<u32>()],
+            );
+        }
         new_image.extend_from_slice(windows_header.as_bytes());
 
         for (_, data) in header_data_directory.iter() {
