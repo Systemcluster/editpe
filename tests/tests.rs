@@ -1039,6 +1039,48 @@ fn remove_icon() {
 }
 
 #[test]
+fn remove_truncated_icon_returns_error() {
+    fn icon_language_table(count: u16) -> ResourceTable {
+        let mut language_table = ResourceTable::default();
+        let mut icon_data = ResourceData::default();
+        icon_data.set_data([0, 0, 1, 0, count as u8, (count >> 8) as u8].to_vec());
+        language_table.insert(
+            ResourceEntryName::ID(LANGUAGE_ID_EN_US as u32),
+            ResourceEntry::Data(icon_data),
+        );
+        language_table
+    }
+
+    let mut truncated_main = ResourceDirectory::default();
+    let mut main_group = ResourceTable::default();
+    main_group.insert(
+        ResourceEntryName::from_string("MAINICON"),
+        ResourceEntry::Table(icon_language_table(1)),
+    );
+    truncated_main
+        .root_mut()
+        .insert(ResourceEntryName::ID(RT_GROUP_ICON as u32), ResourceEntry::Table(main_group));
+
+    let mut truncated_sibling = ResourceDirectory::default();
+    let mut sibling_group = ResourceTable::default();
+    sibling_group.insert(
+        ResourceEntryName::from_string("MAINICON"),
+        ResourceEntry::Table(icon_language_table(0)),
+    );
+    sibling_group.insert(ResourceEntryName::ID(2), ResourceEntry::Table(icon_language_table(1)));
+    truncated_sibling
+        .root_mut()
+        .insert(ResourceEntryName::ID(RT_GROUP_ICON as u32), ResourceEntry::Table(sibling_group));
+
+    for mut directory in [truncated_main, truncated_sibling] {
+        let result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| directory.remove_main_icon()));
+        assert!(result.is_ok(), "truncated icon directories must not panic");
+        assert!(result.unwrap().is_err(), "truncated icon directories must return an error");
+    }
+}
+
+#[test]
 fn get_icon() {
     init_logger();
 
@@ -1120,6 +1162,39 @@ fn set_icon() {
 }
 
 #[test]
+fn set_icon_rejects_identifier_overflow() {
+    let mut directory = ResourceDirectory::default();
+    let mut icon_table = ResourceTable::default();
+    icon_table.insert(
+        ResourceEntryName::ID(u16::MAX as u32),
+        ResourceEntry::Table(ResourceTable::default()),
+    );
+    directory
+        .root_mut()
+        .insert(ResourceEntryName::ID(RT_ICON as u32), ResourceEntry::Table(icon_table));
+
+    let icon = image::load_from_memory(&std::fs::read(BINARY_PATH_ICON).unwrap()).unwrap();
+    let result =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| directory.set_main_icon(icon)));
+    assert!(result.is_ok(), "icon identifier overflow must not panic");
+    assert!(result.unwrap().is_err(), "icon identifier overflow must return an error");
+}
+
+#[test]
+fn set_icon_error_does_not_mutate_resources() {
+    let mut directory = ResourceDirectory::default();
+    directory.root_mut().insert(
+        ResourceEntryName::ID(RT_GROUP_ICON as u32),
+        ResourceEntry::Data(ResourceData::default()),
+    );
+    let original = directory.clone();
+    let icon = image::load_from_memory(&std::fs::read(BINARY_PATH_ICON).unwrap()).unwrap();
+
+    assert!(directory.set_main_icon(icon).is_err(), "invalid group icon table is rejected");
+    assert_eq!(directory, original, "failed icon updates leave resources unchanged");
+}
+
+#[test]
 fn parse_version_info() {
     init_logger();
 
@@ -1161,6 +1236,48 @@ fn build_version_info() {
         data_rebuilt.len(),
         "built version info size equals computed size"
     );
+}
+
+#[test]
+fn build_unicode_version_info() {
+    let mut string_table = VersionStringTable {
+        key: "040904b0".to_string(),
+        ..VersionStringTable::default()
+    };
+    let description = "Grüße 🚀";
+    string_table.strings.insert("Description".to_string(), description.to_string());
+    let version_info = VersionInfo {
+        strings: vec![string_table],
+        ..VersionInfo::default()
+    };
+
+    let data = version_info.build();
+    let key = "Description"
+        .encode_utf16()
+        .flat_map(u16::to_le_bytes)
+        .chain([0, 0])
+        .collect::<Vec<_>>();
+    let key_offset = data.windows(key.len()).position(|window| window == key).unwrap();
+    let value_length = u16::from_le_bytes(data[key_offset - 4..key_offset - 2].try_into().unwrap());
+    assert_eq!(
+        value_length as usize,
+        description.encode_utf16().count() + 1,
+        "value length counts UTF-16 units including the terminator"
+    );
+
+    let rebuilt = VersionInfo::parse(&data).unwrap();
+    assert_eq!(rebuilt, version_info, "Unicode version information round-trips");
+
+    let mut oversized = version_info;
+    oversized.strings[0]
+        .strings
+        .insert("Description".to_string(), "a".repeat(u16::MAX as usize));
+    assert!(oversized.try_build().is_err(), "oversized version blocks are rejected");
+
+    let mut directory = ResourceDirectory::default();
+    let original = directory.clone();
+    assert!(directory.set_version_info(&oversized).is_err());
+    assert_eq!(directory, original, "failed version updates leave resources unchanged");
 }
 
 #[test]

@@ -46,15 +46,15 @@ pub fn aligned_to<T: Add<Output = T> + Sub<Output = T> + Rem<Output = T> + Eq + 
 }
 
 pub fn read_u16_string(data: &[u8]) -> Result<String, ReadError> {
-    let mut string = String::new();
+    let mut string = Vec::new();
     for i in 0..(data.len() / 2) {
         let c = read::<u16>(&data[i * 2..])?;
         if c == 0 {
             break;
         }
-        string.push(char::from_u32(c as u32).unwrap_or(char::REPLACEMENT_CHARACTER));
+        string.push(c);
     }
-    Ok(string)
+    Ok(String::from_utf16_lossy(&string))
 }
 
 pub fn string_to_u16<S: AsRef<str>>(string: S) -> Vec<u8> {

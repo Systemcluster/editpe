@@ -45,14 +45,15 @@ impl ToIcon for &[u8] {
             }
             let size = read::<u32>(&self[6..][i * 16 + 8..])? as usize;
             let offset = read::<u32>(&self[6..][i * 16 + 12..])? as usize;
-            if offset + size > self.len() {
-                return Err(ResourceError::InvalidBytes("icon data is truncated".into()));
-            }
+            let end = match offset.checked_add(size) {
+                Some(end) if end <= self.len() => end,
+                _ => return Err(ResourceError::InvalidBytes("icon data is truncated".into())),
+            };
             let mut data = Vec::with_capacity(14 + size);
             // prepend 12 bytes of ICO directory entry metadata + 2-byte dummy id
             data.extend_from_slice(&self[6..][i * 16..i * 16 + 12]);
             data.extend_from_slice(&[0u8; 2]);
-            data.extend_from_slice(&self[offset..offset + size]);
+            data.extend_from_slice(&self[offset..end]);
             icons.push(data);
         }
         Ok(icons)
@@ -164,13 +165,15 @@ impl ResourceDirectory {
         }
 
         // find the main icon directory
-        let icon_directory_entry = icon_directory_table.entries.first().map(|(_, v)| v).unwrap();
-        if icon_directory_entry.is_table() {
-            return Err(ResourceError::InvalidTable(
-                "group icon table entry is not data".to_string(),
-            ));
-        }
-        let icon_directory_entry = icon_directory_entry.as_data().unwrap();
+        let icon_directory_entry = match icon_directory_table.entries.first().map(|(_, v)| v) {
+            Some(ResourceEntry::Data(data)) => data,
+            Some(ResourceEntry::Table(_)) => {
+                return Err(ResourceError::InvalidTable(
+                    "group icon table entry is not data".to_string(),
+                ));
+            }
+            None => return Ok(None),
+        };
         let icon_directory = read::<IconDirectory>(&icon_directory_entry.data)?;
 
         // get the first icon in the main icon directory
@@ -181,15 +184,12 @@ impl ResourceDirectory {
         let icon_id = icon_directory_entry.id as u32;
 
         // find the main icon table
-        let icon_table = self.root.get(ResourceEntryName::ID(RT_ICON as u32));
-        if icon_table.is_none() {
-            return Ok(None);
-        }
-        let icon_table = match icon_table.unwrap() {
-            ResourceEntry::Table(table) => table,
-            ResourceEntry::Data(_) => {
+        let icon_table = match self.root.get(ResourceEntryName::ID(RT_ICON as u32)) {
+            Some(ResourceEntry::Table(table)) => table,
+            Some(ResourceEntry::Data(_)) => {
                 return Err(ResourceError::InvalidTable("icon table is not a table".to_string()));
             }
+            None => return Ok(None),
         };
 
         let inner_table = icon_table.get(ResourceEntryName::ID(icon_id));
@@ -232,47 +232,81 @@ impl ResourceDirectory {
     /// # Returns
     /// Returns an error if the new icon not a valid image or the resource table structure is not well-formed.
     pub fn set_main_icon<T: ToIcon>(&mut self, icon: T) -> Result<(), ResourceError> {
-        // find the main icon table
-        if self.root.get(ResourceEntryName::ID(RT_ICON as u32)).is_none() {
-            self.root.insert(
-                ResourceEntryName::ID(RT_ICON as u32),
-                ResourceEntry::Table(ResourceTable::default()),
-            );
+        // read and validate all icon entries
+        let icons = icon.icons()?;
+        let icon_count = u16::try_from(icons.len()).map_err(|_| {
+            ResourceError::InvalidBytes(ReadError("icon count exceeds 65535".into()))
+        })?;
+        if icon_count == 0 {
+            return Err(ResourceError::InvalidBytes(ReadError("icon has no images".into())));
         }
-        let icon_table = match self.root.get_mut(ResourceEntryName::ID(RT_ICON as u32)).unwrap() {
-            ResourceEntry::Table(table) => table,
-            ResourceEntry::Data(_) => {
-                return Err(ResourceError::InvalidTable("icon table is not a table".to_string()));
+        for icon in &icons {
+            if icon.len() < 14 {
+                return Err(ResourceError::InvalidBytes(ReadError(
+                    "icon directory entry is too small".into(),
+                )));
             }
-        };
+            u32::try_from(icon.len() - 14).map_err(|_| {
+                ResourceError::InvalidBytes(ReadError("icon image exceeds 4GiB".into()))
+            })?;
+        }
 
-        // find the first free icon id
+        // find the main icon table
+        let icon_table_name = ResourceEntryName::ID(RT_ICON as u32);
+        let mut icon_table = self
+            .root
+            .cloned_table_or_default(&icon_table_name, "icon table is not a table")?;
+        let group_table_name = ResourceEntryName::ID(RT_GROUP_ICON as u32);
+        let mut group_table = self
+            .root
+            .cloned_table_or_default(&group_table_name, "group icon table is not a table")?;
         let first_free_icon_id = icon_table
             .entries
             .keys()
-            .filter_map(|k| match k {
+            .filter_map(|key| match key {
                 ResourceEntryName::ID(id) => Some(*id),
-                _ => None,
+                ResourceEntryName::Name(_) => None,
             })
             .max()
             .unwrap_or(0)
-            + 1;
-
-        // read the icon and resize it to the different resolutions
-        let icons = icon.icons()?;
+            .checked_add(1)
+            .ok_or_else(|| {
+                ResourceError::InvalidBytes(ReadError("icon identifier overflows".into()))
+            })?;
+        let last_icon_id =
+            first_free_icon_id.checked_add(u32::from(icon_count) - 1).ok_or_else(|| {
+                ResourceError::InvalidBytes(ReadError("icon identifier overflows".into()))
+            })?;
+        if last_icon_id > u16::MAX as u32 {
+            return Err(ResourceError::InvalidBytes(ReadError(
+                "icon identifier exceeds 65535".into(),
+            )));
+        }
 
         // add the icons to the icon table
         let mut icon_directory_entries = Vec::new();
         for (i, icon) in icons.iter().enumerate() {
-            let id = first_free_icon_id + i as u32;
+            let id = first_free_icon_id
+                .checked_add(u32::try_from(i).map_err(|_| {
+                    ResourceError::InvalidBytes(ReadError("icon index exceeds u32".into()))
+                })?)
+                .ok_or_else(|| {
+                    ResourceError::InvalidBytes(ReadError("icon identifier overflows".into()))
+                })?;
             let mut inner_table = ResourceTable::default();
             inner_table.insert(
                 ResourceEntryName::ID(LANGUAGE_ID_EN_US as u32),
                 ResourceEntry::Data(ResourceData {
                     data:     {
                         let mut entry = read::<IconDirectoryEntry>(&icon[..14])?;
-                        entry.id = id as u16;
-                        entry.bytes = (icon.len() - 14) as u32;
+                        entry.id = u16::try_from(id).map_err(|_| {
+                            ResourceError::InvalidBytes(ReadError(
+                                "icon identifier exceeds 65535".into(),
+                            ))
+                        })?;
+                        entry.bytes = u32::try_from(icon.len() - 14).map_err(|_| {
+                            ResourceError::InvalidBytes(ReadError("icon image exceeds 4GiB".into()))
+                        })?;
                         icon_directory_entries.push(entry);
                         icon[14..].to_vec().into()
                     },
@@ -282,23 +316,6 @@ impl ResourceDirectory {
             );
             icon_table.insert(ResourceEntryName::ID(id), ResourceEntry::Table(inner_table));
         }
-
-        // find the group icon table
-        if self.root.get(ResourceEntryName::ID(RT_GROUP_ICON as u32)).is_none() {
-            self.root.insert(
-                ResourceEntryName::ID(RT_GROUP_ICON as u32),
-                ResourceEntry::Table(ResourceTable::default()),
-            );
-        }
-        let group_table =
-            match self.root.get_mut(ResourceEntryName::ID(RT_GROUP_ICON as u32)).unwrap() {
-                ResourceEntry::Table(table) => table,
-                ResourceEntry::Data(_) => {
-                    return Err(ResourceError::InvalidTable(
-                        "group icon table is not a table".to_string(),
-                    ));
-                }
-            };
 
         // insert the main icon directory table
         let mut inner_table = ResourceTable::default();
@@ -310,7 +327,7 @@ impl ResourceDirectory {
                     let icon_directory = IconDirectory {
                         reserved: 0,
                         type_:    1,
-                        count:    icon_directory_entries.len() as u16,
+                        count:    icon_count,
                     };
                     data.extend(icon_directory.as_bytes());
                     for entry in icon_directory_entries {
@@ -327,6 +344,8 @@ impl ResourceDirectory {
             ResourceEntry::Table(inner_table),
             0,
         );
+        self.root.insert(icon_table_name, ResourceEntry::Table(icon_table));
+        self.root.insert(group_table_name, ResourceEntry::Table(group_table));
 
         Ok(())
     }
@@ -414,20 +433,23 @@ impl ResourceDirectory {
         }
 
         // find the main icon directory
-        let icon_directory_entry = icon_directory_table.entries.first().map(|(_, v)| v).unwrap();
-        if icon_directory_entry.is_table() {
-            return Err(ResourceError::InvalidTable(
-                "group icon table entry is not data".to_string(),
-            ));
-        }
-        let icon_directory_entry = icon_directory_entry.as_data().unwrap();
+        let icon_directory_entry = match icon_directory_table.entries.first().map(|(_, v)| v) {
+            Some(ResourceEntry::Data(data)) => data,
+            Some(ResourceEntry::Table(_)) => {
+                return Err(ResourceError::InvalidTable(
+                    "group icon table entry is not data".to_string(),
+                ));
+            }
+            None => return Ok(()),
+        };
         let icon_directory = read::<IconDirectory>(&icon_directory_entry.data)?;
 
         // get a list of all icons in the main icon directory for removal
         let mut icons_to_remove = IndexSet::with_hasher(RandomState::default());
         for i in 0..icon_directory.count {
-            let icon_directory_entry = read::<IconDirectoryEntry>(
-                &icon_directory_entry.data[6 + i as usize * size_of::<IconDirectoryEntry>()..],
+            let icon_directory_entry = read_at::<IconDirectoryEntry>(
+                &icon_directory_entry.data,
+                6 + i as usize * size_of::<IconDirectoryEntry>(),
             )?;
             let icon_id = icon_directory_entry.id;
             icons_to_remove.insert(icon_id);
@@ -438,24 +460,23 @@ impl ResourceDirectory {
             if other_icon_directory_name == &icon_directory_name {
                 continue;
             }
-            if !other_icon_directory_table.is_table() {
-                continue;
-            }
-            let other_icon_directory_table = other_icon_directory_table.as_table().unwrap();
+            let other_icon_directory_table = match other_icon_directory_table {
+                ResourceEntry::Table(table) => table,
+                ResourceEntry::Data(_) => continue,
+            };
             if other_icon_directory_table.entries.is_empty() {
                 continue;
             }
             let other_icon_directory_entry =
-                other_icon_directory_table.entries.first().map(|(_, v)| v).unwrap();
-            if other_icon_directory_entry.is_table() {
-                continue;
-            }
-            let other_icon_directory_entry = other_icon_directory_entry.as_data().unwrap();
+                match other_icon_directory_table.entries.first().map(|(_, v)| v) {
+                    Some(ResourceEntry::Data(data)) => data,
+                    Some(ResourceEntry::Table(_)) | None => continue,
+                };
             let other_icon_directory = read::<IconDirectory>(&other_icon_directory_entry.data)?;
             for i in 0..other_icon_directory.count {
-                let icon_directory_entry = read::<IconDirectoryEntry>(
-                    &other_icon_directory_entry.data
-                        [6 + i as usize * size_of::<IconDirectoryEntry>()..],
+                let icon_directory_entry = read_at::<IconDirectoryEntry>(
+                    &other_icon_directory_entry.data,
+                    6 + i as usize * size_of::<IconDirectoryEntry>(),
                 )?;
                 let icon_id = icon_directory_entry.id;
                 icons_to_remove.swap_remove(&icon_id);
@@ -469,15 +490,10 @@ impl ResourceDirectory {
         }
 
         // find the main icon table
-        let icon_table = self.root.get_mut(ResourceEntryName::ID(RT_ICON as u32));
-        if icon_table.is_none() {
-            return Ok(());
-        }
-        let icon_table = icon_table.unwrap();
-        if !icon_table.is_table() {
-            return Ok(());
-        }
-        let icon_table = icon_table.as_table_mut().unwrap();
+        let icon_table = match self.root.get_mut(ResourceEntryName::ID(RT_ICON as u32)) {
+            Some(ResourceEntry::Table(table)) => table,
+            Some(ResourceEntry::Data(_)) | None => return Ok(()),
+        };
 
         // remove the icons from the icon table
         for icon_id in icons_to_remove {
@@ -535,10 +551,14 @@ impl ResourceDirectory {
             .or_else(|| inner_table.entries.first())
             .map(|(_, v)| v)
             .unwrap();
-        if version_directory_entry.is_table() {
-            return Err(ResourceError::InvalidTable("version table entry is not data".to_string()));
-        }
-        let version_directory_entry = version_directory_entry.as_data().unwrap();
+        let version_directory_entry = match version_directory_entry {
+            ResourceEntry::Data(data) => data,
+            ResourceEntry::Table(_) => {
+                return Err(ResourceError::InvalidTable(
+                    "version table entry is not data".to_string(),
+                ));
+            }
+        };
 
         Ok(Some(VersionInfo::parse(&version_directory_entry.data)?))
     }
@@ -550,22 +570,11 @@ impl ResourceDirectory {
     /// # Returns
     /// Returns an error if the resource table structure is not well-formed.
     pub fn set_version_info(&mut self, version_info: &VersionInfo) -> Result<(), ResourceError> {
-        // find the version table
-        if self.root.get(ResourceEntryName::ID(RT_VERSION as u32)).is_none() {
-            self.root.insert(
-                ResourceEntryName::ID(RT_VERSION as u32),
-                ResourceEntry::Table(ResourceTable::default()),
-            );
-        }
-        let version_table =
-            match self.root.get_mut(ResourceEntryName::ID(RT_VERSION as u32)).unwrap() {
-                ResourceEntry::Table(table) => table,
-                ResourceEntry::Data(_) => {
-                    return Err(ResourceError::InvalidTable(
-                        "version table is not a table".to_string(),
-                    ));
-                }
-            };
+        let data = version_info.try_build()?;
+        let version_table_name = ResourceEntryName::ID(RT_VERSION as u32);
+        let mut version_table = self
+            .root
+            .cloned_table_or_default(&version_table_name, "version table is not a table")?;
 
         // find the main version directory table
         let inner_table = version_table.entries.first().map(|(_, v)| v);
@@ -582,13 +591,14 @@ impl ResourceDirectory {
         inner_table.insert_at(
             ResourceEntryName::ID(LANGUAGE_ID_EN_US as u32),
             ResourceEntry::Data(ResourceData {
-                data:     version_info.build().into(),
+                data:     data.into(),
                 codepage: CODE_PAGE_ID_EN_US as u32,
                 reserved: 0,
             }),
             0,
         );
         version_table.insert_at(ResourceEntryName::ID(1), ResourceEntry::Table(inner_table), 0);
+        self.root.insert(version_table_name, ResourceEntry::Table(version_table));
 
         Ok(())
     }
@@ -692,12 +702,14 @@ impl ResourceDirectory {
             .or_else(|| inner_table.entries.first())
             .map(|(_, v)| v)
             .unwrap();
-        if manifest_directory_entry.is_table() {
-            return Err(ResourceError::InvalidTable(
-                "manifest table entry is not data".to_string(),
-            ));
-        }
-        let manifest_directory_entry = manifest_directory_entry.as_data().unwrap();
+        let manifest_directory_entry = match manifest_directory_entry {
+            ResourceEntry::Data(data) => data,
+            ResourceEntry::Table(_) => {
+                return Err(ResourceError::InvalidTable(
+                    "manifest table entry is not data".to_string(),
+                ));
+            }
+        };
 
         Ok(Some(String::from_utf8_lossy(&manifest_directory_entry.data).to_string()))
     }
@@ -709,21 +721,10 @@ impl ResourceDirectory {
     /// # Returns
     /// Returns an error if the resource table structure is not well-formed.
     pub fn set_manifest(&mut self, manifest: &str) -> Result<(), ResourceError> {
-        if self.root.get(ResourceEntryName::ID(RT_MANIFEST as u32)).is_none() {
-            self.root.insert(
-                ResourceEntryName::ID(RT_MANIFEST as u32),
-                ResourceEntry::Table(ResourceTable::default()),
-            );
-        }
-        let manifest_table =
-            match self.root.get_mut(ResourceEntryName::ID(RT_MANIFEST as u32)).unwrap() {
-                ResourceEntry::Table(table) => table,
-                ResourceEntry::Data(_) => {
-                    return Err(ResourceError::InvalidTable(
-                        "manifest table is not a table".to_string(),
-                    ));
-                }
-            };
+        let manifest_table_name = ResourceEntryName::ID(RT_MANIFEST as u32);
+        let mut manifest_table = self
+            .root
+            .cloned_table_or_default(&manifest_table_name, "manifest table is not a table")?;
 
         // find the main manifest directory table
         let inner_table = manifest_table.entries.first().map(|(_, v)| v);
@@ -747,6 +748,7 @@ impl ResourceDirectory {
             0,
         );
         manifest_table.insert_at(ResourceEntryName::ID(1), ResourceEntry::Table(inner_table), 0);
+        self.root.insert(manifest_table_name, ResourceEntry::Table(manifest_table));
 
         Ok(())
     }
@@ -834,6 +836,16 @@ pub struct ResourceTable {
     pub(crate) entries: IndexMap<ResourceEntryName, ResourceEntry, RandomState>,
 }
 impl ResourceTable {
+    fn cloned_table_or_default<N: Borrow<ResourceEntryName>>(
+        &self, name: N, error: &str,
+    ) -> Result<Self, ResourceError> {
+        match self.get(name) {
+            Some(ResourceEntry::Table(table)) => Ok(table.clone()),
+            Some(ResourceEntry::Data(_)) => Err(ResourceError::InvalidTable(error.to_string())),
+            None => Ok(Self::default()),
+        }
+    }
+
     fn parse(
         image: &[u8], base_address: u32, virtual_address: u32, directory_offset: u32, level: usize,
         ancestors: &mut Vec<u32>,
@@ -1666,7 +1678,7 @@ impl VersionInfo {
                     )));
                 }
             }
-            child_offset = aligned_to(child_offset + file_info_header.length as usize, 4);
+            child_offset = aligned_to(file_info_end, 4);
         }
 
         Ok(Self {
@@ -1677,19 +1689,23 @@ impl VersionInfo {
     }
 
     /// Build the version info into raw bytes to be included in a resource table.
-    pub fn build(&self) -> Vec<u8> {
+    pub fn try_build(&self) -> Result<Vec<u8>, ResourceError> {
         let mut data = Vec::new();
 
         let mut string_tables = Vec::new();
         for string_table_data in &self.strings {
             let mut string_table_children = Vec::new();
             for (key, value) in &string_table_data.strings {
+                let key_units = u16_string_len(key);
+                let value_units = u16_string_len(value);
                 let mut string = Vec::new();
                 string.extend(
                     VersionHeader {
-                        length:       ((aligned_to(6 + key.len() * 2 + 2, 4) + value.len() * 2 + 2)
-                            as u16),
-                        value_length: value.len() as u16 + 1,
+                        length:       version_length(
+                            aligned_to(6 + key_units * 2 + 2, 4) + value_units * 2 + 2,
+                            "version string",
+                        )?,
+                        value_length: version_length(value_units + 1, "version string value")?,
                         type_:        1,
                     }
                     .as_bytes(),
@@ -1701,10 +1717,13 @@ impl VersionInfo {
                 string_table_children.extend(string);
             }
             let mut string_table = Vec::new();
+            let key_units = u16_string_len(&string_table_data.key);
             string_table.extend(
                 VersionHeader {
-                    length:       (aligned_to(6 + string_table_data.key.len() * 2 + 2, 4)
-                        + string_table_children.len()) as u16,
+                    length:       version_length(
+                        aligned_to(6 + key_units * 2 + 2, 4) + string_table_children.len(),
+                        "version string table",
+                    )?,
                     value_length: 0,
                     type_:        1,
                 }
@@ -1719,10 +1738,13 @@ impl VersionInfo {
         }
 
         let mut string_info = Vec::new();
+        let string_info_key_units = u16_string_len("StringFileInfo");
         string_info.extend(
             VersionHeader {
-                length:       (aligned_to(6 + "StringFileInfo".len() * 2 + 2, 4)
-                    + string_tables.len()) as u16,
+                length:       version_length(
+                    aligned_to(6 + string_info_key_units * 2 + 2, 4) + string_tables.len(),
+                    "string file info",
+                )?,
                 value_length: 0,
                 type_:        1,
             }
@@ -1734,11 +1756,19 @@ impl VersionInfo {
         string_info.extend(string_tables);
 
         let mut var = Vec::new();
+        let var_data_length = self
+            .vars
+            .len()
+            .checked_mul(size_of::<VersionU16>())
+            .expect("translation data length overflows usize");
+        let translation_key_units = u16_string_len("Translation");
         var.extend(
             VersionHeader {
-                length:       (aligned_to(6 + "Translation".len() * 2 + 2, 4) + self.vars.len() * 4)
-                    as u16,
-                value_length: (self.vars.len() * 4) as u16,
+                length:       version_length(
+                    aligned_to(6 + translation_key_units * 2 + 2, 4) + var_data_length,
+                    "translation table",
+                )?,
+                value_length: version_length(var_data_length, "translation data")?,
                 type_:        0,
             }
             .as_bytes(),
@@ -1749,9 +1779,13 @@ impl VersionInfo {
         var.extend(iter::repeat(0).take(aligned_to(var.len(), 4) - var.len()));
 
         let mut var_info = Vec::new();
+        let var_info_key_units = u16_string_len("VarFileInfo");
         var_info.extend(
             VersionHeader {
-                length:       (aligned_to(6 + "VarFileInfo".len() * 2 + 2, 4) + var.len()) as u16,
+                length:       version_length(
+                    aligned_to(6 + var_info_key_units * 2 + 2, 4) + var.len(),
+                    "var file info",
+                )?,
                 value_length: 0,
                 type_:        1,
             }
@@ -1761,14 +1795,18 @@ impl VersionInfo {
         var_info.extend(iter::repeat(0).take(aligned_to(var_info.len(), 4) - var_info.len()));
         var_info.extend(var);
 
+        let root_key_units = u16_string_len("VS_VERSION_INFO");
         data.extend(
             VersionHeader {
-                length:       (aligned_to(
-                    aligned_to(6 + "VS_VERSION_INFO".len() * 2 + 2, 4) + size_of::<FixedFileInfo>(),
-                    4,
-                ) + string_info.len()
-                    + var_info.len()) as u16,
-                value_length: size_of::<FixedFileInfo>() as u16,
+                length:       version_length(
+                    aligned_to(
+                        aligned_to(6 + root_key_units * 2 + 2, 4) + size_of::<FixedFileInfo>(),
+                        4,
+                    ) + string_info.len()
+                        + var_info.len(),
+                    "version root",
+                )?,
+                value_length: version_length(size_of::<FixedFileInfo>(), "fixed file info")?,
                 type_:        0,
             }
             .as_bytes(),
@@ -1780,6 +1818,11 @@ impl VersionInfo {
         data.extend(string_info);
         data.extend(var_info);
 
-        data
+        Ok(data)
+    }
+
+    /// Build the version info into raw bytes to be included in a resource table.
+    pub fn build(&self) -> Vec<u8> {
+        self.try_build().expect("version information exceeds format limits")
     }
 }
