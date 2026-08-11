@@ -1010,6 +1010,25 @@ fn convert_resource_name_string() {
         Some("MAINICON".to_string()),
         "resource name conversion to string is correct",
     );
+    assert_eq!(
+        ResourceEntryName::from_string("Grüße").to_string(),
+        Some("Grüße".to_string()),
+        "Unicode resource name conversion is correct",
+    );
+    assert_eq!(
+        ResourceEntryName::from_string("Launch 🚀").to_string(),
+        Some("Launch 🚀".to_string()),
+        "resource names preserve UTF-16 surrogate pairs",
+    );
+    assert!(
+        ResourceEntryName::try_from_string("a".repeat(u16::MAX as usize + 1)).is_err(),
+        "oversized resource names are rejected",
+    );
+    assert_eq!(
+        ResourceEntryName::Name(Vec::new()).to_string(),
+        None,
+        "malformed resource names do not panic",
+    );
 }
 
 #[test]

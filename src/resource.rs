@@ -1046,11 +1046,12 @@ impl ResourceTable {
         sorted_keys.sort_by(|a, b| match (a, b) {
             (ResourceEntryName::Name(_), ResourceEntryName::ID(_)) => Ordering::Less,
             (ResourceEntryName::ID(_), ResourceEntryName::Name(_)) => Ordering::Greater,
-            (ResourceEntryName::Name(_), ResourceEntryName::Name(_)) => a
-                .to_string()
-                .unwrap()
-                .to_uppercase()
-                .cmp(&b.to_string().unwrap().to_uppercase()),
+            (ResourceEntryName::Name(_), ResourceEntryName::Name(_)) => {
+                match (a.to_string(), b.to_string()) {
+                    (Some(a), Some(b)) => a.to_uppercase().cmp(&b.to_uppercase()),
+                    _ => a.string_data().cmp(b.string_data()),
+                }
+            }
             (ResourceEntryName::ID(a), ResourceEntryName::ID(b)) => a.cmp(b),
         });
 
@@ -1410,25 +1411,33 @@ impl ResourceEntryName {
     }
 
     pub fn from_string<S: AsRef<str>>(string: S) -> Self {
+        Self::try_from_string(string).expect("resource name exceeds 65535 UTF-16 units")
+    }
+
+    pub fn try_from_string<S: AsRef<str>>(string: S) -> Result<Self, ResourceError> {
         let string = string.as_ref();
+        let string = string.encode_utf16().collect::<Vec<_>>();
+        let length = u16::try_from(string.len()).map_err(|_| {
+            ResourceError::InvalidBytes(ReadError(
+                "resource name exceeds 65535 UTF-16 units".into(),
+            ))
+        })?;
         let mut data = Vec::with_capacity(string.len() * 2 + 2);
-        data.extend_from_slice(&(string.len() as u16).to_le_bytes());
-        data.extend(string.encode_utf16().flat_map(|c| c.to_le_bytes()));
-        Self::Name(data)
+        data.extend_from_slice(&length.to_le_bytes());
+        data.extend(string.into_iter().flat_map(|c| c.to_le_bytes()));
+        Ok(Self::Name(data))
     }
 
     pub fn to_string(&self) -> Option<String> {
         match self {
             Self::ID(_) => None,
             Self::Name(data) => {
-                let length = read::<u16>(&data[0..]).unwrap() as usize;
-                let data = &data[2..];
-                let mut string = String::with_capacity(length);
-                for i in 0..length {
-                    let c = read::<u16>(&data[i * 2..]).unwrap() as u32;
-                    string.push(char::from_u32(c).unwrap_or(char::REPLACEMENT_CHARACTER));
-                }
-                Some(string)
+                let length = read_at::<u16>(data, 0).ok()? as usize;
+                let data = checked_slice(data, 2, length.checked_mul(2)?).ok()?;
+                let string = (0..length)
+                    .map(|index| u16::from_le_bytes([data[index * 2], data[index * 2 + 1]]))
+                    .collect::<Vec<_>>();
+                Some(String::from_utf16_lossy(&string))
             }
         }
     }
