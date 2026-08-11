@@ -125,6 +125,43 @@ fn parse_cyclic_resource_directory_is_skipped() {
 }
 
 #[test]
+fn set_resource_directory_aligns_appended_section_data() {
+    let source_data = std::fs::read(BINARY_PATH_LARGE).unwrap();
+    let source_resources =
+        Image::parse(source_data).unwrap().resource_directory().cloned().unwrap();
+    let mut data = std::fs::read(BINARY_PATH_SMALL).unwrap();
+    let image = Image::parse(&data[..]).unwrap();
+    let last_section_index = image
+        .section_table()
+        .iter()
+        .enumerate()
+        .max_by_key(|(_, section)| {
+            u64::from(section.pointer_to_raw_data) + u64::from(section.size_of_raw_data)
+        })
+        .map(|(index, _)| index)
+        .unwrap();
+    let raw_size_offset = section_header_offset(&image, last_section_index) + 16;
+    let raw_size = u32::from_le_bytes(
+        data[raw_size_offset..raw_size_offset + size_of::<u32>()].try_into().unwrap(),
+    );
+    data[raw_size_offset..raw_size_offset + size_of::<u32>()]
+        .copy_from_slice(&(raw_size - 1).to_le_bytes());
+
+    let mut image = Image::parse(data).unwrap();
+    image.set_resource_directory(source_resources).unwrap();
+
+    let resource_section = image
+        .section_header_for_data_directory(DataDirectoryType::ResourceTable)
+        .unwrap();
+    assert_eq!(
+        resource_section.pointer_to_raw_data % image.windows_header().file_alignment(),
+        0,
+        "appended section data is file-aligned"
+    );
+    assert!(Image::parse(image.data()).is_ok(), "aligned output reparses");
+}
+
+#[test]
 fn parse_truncated_version_info_returns_error() {
     let data = [6, 0, size_of::<FixedFileInfo>() as u8, 0, 0, 0];
     let result = std::panic::catch_unwind(|| VersionInfo::parse(&data));
@@ -286,6 +323,34 @@ fn pe32_base_of_data(data: &[u8]) -> u32 {
     u32::from_le_bytes(data[offset..offset + size_of::<u32>()].try_into().unwrap())
 }
 
+fn section_header_offset(image: &Image<'_>, index: usize) -> usize {
+    pe_signature_offset(image.data())
+        + size_of::<u32>()
+        + size_of::<CoffHeader>()
+        + image.coff_header().size_of_optional_header as usize
+        + index * size_of::<SectionHeader>()
+}
+
+fn data_directory_offset(image: &Image<'_>, index: usize) -> usize {
+    let standard_header_offset =
+        pe_signature_offset(image.data()) + size_of::<u32>() + size_of::<CoffHeader>();
+    let optional_header_size = if image.standard_header().magic == PE_32_MAGIC {
+        96
+    } else {
+        112
+    };
+    standard_header_offset + optional_header_size + index * size_of::<ImageDataDirectory>()
+}
+
+fn last_section_end(image: &Image<'_>) -> usize {
+    image
+        .section_table()
+        .iter()
+        .map(|section| section.pointer_to_raw_data as usize + section.size_of_raw_data as usize)
+        .max()
+        .unwrap_or(image.data().len())
+}
+
 fn expected_size_of_image(image: &Image<'_>) -> u32 {
     let alignment = u64::from(image.windows_header().section_alignment());
     assert!(alignment > 0, "section alignment must be non-zero");
@@ -325,6 +390,36 @@ fn set_pe32_resource_section() {
 
     let new_image = Image::parse(new_data).unwrap();
     assert_eq!(image, new_image, "original and rebuilt PE32 images equal");
+}
+
+#[test]
+fn set_resource_directory_reuses_optional_header_capacity() {
+    let data = std::fs::read(BINARY_PATH_SMALL).unwrap();
+    let source_resources = Image::parse(&data[..]).unwrap().resource_directory().cloned().unwrap();
+    let mut data = data;
+    let number_of_rva_and_sizes_offset =
+        data_directory_offset(&Image::parse(&data[..]).unwrap(), 0) - size_of::<u32>();
+    data[number_of_rva_and_sizes_offset..number_of_rva_and_sizes_offset + size_of::<u32>()]
+        .copy_from_slice(&2u32.to_le_bytes());
+
+    let mut image = Image::parse(data).unwrap();
+    let optional_header_size = image.coff_header().size_of_optional_header;
+    assert!(image.resource_directory().is_none(), "resource directory is not declared");
+
+    image.set_resource_directory(source_resources).unwrap();
+
+    assert_eq!(
+        image.coff_header().size_of_optional_header,
+        optional_header_size,
+        "existing optional-header directory capacity is reused"
+    );
+    let reparsed = Image::parse(image.data()).unwrap();
+    assert_eq!(image.section_table(), reparsed.section_table(), "section table remains aligned");
+    assert_eq!(
+        image.resource_directory(),
+        reparsed.resource_directory(),
+        "resource directory survives reparsing"
+    );
 }
 
 #[test]
@@ -394,10 +489,18 @@ fn set_resource_section_rejects_invalid_section_layout() {
                 "resource directory can be parsed with an invalid virtual size ({binary_path})"
             );
             let resource_directory = image.resource_directory().cloned().unwrap();
+            let image_before = image.cloned();
+            let data_before = image.data().to_vec();
             let result = image.set_resource_directory(resource_directory);
             assert!(
                 matches!(result, Err(ImageWriteError::InvalidSectionRange(_, _))),
                 "set_resource_directory errors when {description} overflows ({binary_path}): {result:?}"
+            );
+            assert_eq!(image, image_before, "failed write preserves image state ({binary_path})");
+            assert_eq!(
+                image.data(),
+                data_before,
+                "failed write preserves image data ({binary_path})"
             );
         }
     }
@@ -429,9 +532,15 @@ fn transfer_resource_section_small() {
         ResourceEntryName::ID(14),
         source_resource_directory.root().get(ResourceEntryName::ID(14)).unwrap().clone(),
     );
+    let target_size = target_resource_directory.size();
 
     image_large.set_resource_directory(target_resource_directory).unwrap();
 
+    assert_eq!(
+        image_large.data_directory(DataDirectoryType::ResourceTable).unwrap().size,
+        target_size,
+        "resource data directory size matches the replacement"
+    );
     let data_large_rebuilt = image_large.data();
     let image_large_rebuilt = Image::parse(data_large_rebuilt).unwrap();
     assert_eq!(
@@ -523,13 +632,16 @@ fn set_resource_directory_repeated_without_reparse() {
     let original_section_count = image_small.coff_header().number_of_sections;
 
     let source = image_large.resource_directory().cloned().unwrap();
-    let mut target = image_small.resource_directory().cloned().unwrap();
-    target.root_mut().insert(
+    let original = image_small.resource_directory().cloned().unwrap();
+    let mut larger = original.clone();
+    larger.root_mut().insert(
         ResourceEntryName::ID(24),
         source.root().get(ResourceEntryName::ID(24)).unwrap().clone(),
     );
+    assert!(larger.size() > original.size(), "modified resource directory is larger");
 
-    image_small.set_resource_directory(target.clone()).unwrap();
+    let previous = image_small.set_resource_directory(larger.clone()).unwrap();
+    assert_eq!(previous, Some(original.clone()), "first write returns original resources");
     let after_first = image_small.data().to_vec();
     assert_eq!(
         image_small.coff_header().number_of_sections,
@@ -540,18 +652,42 @@ fn set_resource_directory_repeated_without_reparse() {
         after_first.len() > data_small.len(),
         "first write grows the image (new section path)"
     );
+    let appended_resource_rva = image_small
+        .data_directory(DataDirectoryType::ResourceTable)
+        .unwrap()
+        .virtual_address;
 
-    // second setting of resource should keep the same size
-    image_small.set_resource_directory(target.clone()).unwrap();
+    let previous = image_small.set_resource_directory(original.clone()).unwrap().unwrap();
+    assert_eq!(previous.root(), larger.root(), "shrinking returns larger resources");
+    assert_eq!(
+        previous.virtual_address(),
+        appended_resource_rva,
+        "returned resources carry their target-image RVA"
+    );
     let after_second = image_small.data().to_vec();
     assert_eq!(
-        after_first.len(),
-        after_second.len(),
-        "second same-size write does not change file length"
+        image_small.coff_header().number_of_sections,
+        original_section_count + 1,
+        "shrinking reuses the appended resource section"
     );
-    assert_eq!(after_first, after_second, "second same-resource-directory write equals in data");
+    assert!(after_second.len() < after_first.len(), "second write shrinks the last section");
 
-    let reparsed = Image::parse(&after_second[..]).unwrap();
+    let previous = image_small.set_resource_directory(larger.clone()).unwrap().unwrap();
+    assert_eq!(previous.root(), original.root(), "growing returns smaller resources");
+    assert_eq!(
+        previous.virtual_address(),
+        appended_resource_rva,
+        "reused resources retain their target-image RVA"
+    );
+    let after_third = image_small.data().to_vec();
+    assert_eq!(
+        image_small.coff_header().number_of_sections,
+        original_section_count + 1,
+        "growing again reuses the appended resource section"
+    );
+    assert_eq!(after_first, after_third, "grow-shrink-grow writes deterministic data");
+
+    let reparsed = Image::parse(&after_third[..]).unwrap();
     assert_eq!(
         image_small.resource_directory().unwrap().root(),
         reparsed.resource_directory().unwrap().root(),
@@ -566,6 +702,223 @@ fn set_resource_directory_repeated_without_reparse() {
         reparsed.windows_header().size_of_image(),
         expected_size_of_image(&reparsed),
         "SizeOfImage remains consistent after double write"
+    );
+}
+
+#[test]
+fn set_pe32_resource_directory_repeated_without_reparse() {
+    init_logger();
+
+    let data_large = std::fs::read(BINARY_PATH_LARGE).unwrap();
+    let image_large = Image::parse(&data_large[..]).unwrap();
+    let data = std::fs::read(BINARY_PATH_SMALL_32).unwrap();
+    let mut image = Image::parse(&data[..]).unwrap();
+    assert_eq!(image.standard_header().magic, PE_32_MAGIC, "fixture is PE32");
+
+    let original_base_of_data = pe32_base_of_data(&data);
+    let original_section_count = image.coff_header().number_of_sections;
+    let source = image_large.resource_directory().cloned().unwrap();
+    let mut resources = image.resource_directory().cloned().unwrap();
+    resources.root_mut().insert(
+        ResourceEntryName::ID(24),
+        source.root().get(ResourceEntryName::ID(24)).unwrap().clone(),
+    );
+
+    image.set_resource_directory(resources.clone()).unwrap();
+    let after_first = image.data().to_vec();
+    assert_eq!(
+        image.coff_header().number_of_sections,
+        original_section_count,
+        "first PE32 write expands the last resource section in place"
+    );
+    assert!(after_first.len() > data.len(), "first PE32 write grows the resource section");
+    image.set_resource_directory(resources).unwrap();
+    assert_eq!(image.data(), after_first, "second PE32 write produces identical data");
+    assert_eq!(
+        pe32_base_of_data(image.data()),
+        original_base_of_data,
+        "PE32 BaseOfData is preserved across repeated writes"
+    );
+
+    let reparsed = Image::parse(image.data()).unwrap();
+    assert_eq!(image, reparsed, "repeatedly rebuilt PE32 image reparses equally");
+}
+
+#[test]
+fn set_resource_directory_preserves_overlay() {
+    init_logger();
+
+    const OVERLAY_SENTINEL: &[u8] = b"editpe overlay sentinel";
+
+    let data_large = std::fs::read(BINARY_PATH_LARGE).unwrap();
+    let image_large = Image::parse(&data_large[..]).unwrap();
+    let mut data = std::fs::read(BINARY_PATH_SMALL).unwrap();
+    data.extend_from_slice(OVERLAY_SENTINEL);
+    let mut image = Image::parse(data).unwrap();
+    let original_last_section_end = last_section_end(&image);
+    let original_overlay = image.data()[original_last_section_end..].to_vec();
+
+    let source = image_large.resource_directory().cloned().unwrap();
+    let mut resources = image.resource_directory().cloned().unwrap();
+    resources.root_mut().insert(
+        ResourceEntryName::ID(24),
+        source.root().get(ResourceEntryName::ID(24)).unwrap().clone(),
+    );
+    image.set_resource_directory(resources).unwrap();
+
+    let resource_section = image
+        .section_header_for_data_directory(DataDirectoryType::ResourceTable)
+        .unwrap();
+    assert_eq!(
+        resource_section.name().as_deref(),
+        Some(".pedata"),
+        "new resource section added"
+    );
+    assert_eq!(
+        &image.data()[last_section_end(&image)..],
+        original_overlay,
+        "all data after the original sections is preserved after the new section"
+    );
+    assert!(
+        image.data().ends_with(OVERLAY_SENTINEL),
+        "overlay sentinel remains at end of image"
+    );
+}
+
+#[test]
+fn set_resource_directory_rejects_overflowing_new_section_address() {
+    init_logger();
+
+    let data_large = std::fs::read(BINARY_PATH_LARGE).unwrap();
+    let image_large = Image::parse(&data_large[..]).unwrap();
+    let mut data = std::fs::read(BINARY_PATH_SMALL).unwrap();
+    let image = Image::parse(&data[..]).unwrap();
+    let last_section_index = image.coff_header().number_of_sections as usize - 1;
+    let last_section_offset = section_header_offset(&image, last_section_index);
+    let virtual_size_offset = last_section_offset + size_of::<u64>();
+    let virtual_address_offset = virtual_size_offset + size_of::<u32>();
+    data[virtual_size_offset..virtual_size_offset + size_of::<u32>()]
+        .copy_from_slice(&0x800_u32.to_le_bytes());
+    data[virtual_address_offset..virtual_address_offset + size_of::<u32>()]
+        .copy_from_slice(&0xffff_f000_u32.to_le_bytes());
+
+    let mut image = Image::parse(data).unwrap();
+    let source = image_large.resource_directory().cloned().unwrap();
+    let mut resources = image.resource_directory().cloned().unwrap();
+    resources.root_mut().insert(
+        ResourceEntryName::ID(24),
+        source.root().get(ResourceEntryName::ID(24)).unwrap().clone(),
+    );
+    let image_before = image.cloned();
+    let data_before = image.data().to_vec();
+    let result = image.set_resource_directory(resources);
+
+    assert!(
+        matches!(result, Err(ImageWriteError::InvalidSectionRange(0x1_0000_0000, _))),
+        "new section address overflow is rejected: {result:?}"
+    );
+    assert_eq!(image, image_before, "failed append preserves image state");
+    assert_eq!(image.data(), data_before, "failed append preserves image data");
+}
+
+#[test]
+fn set_resource_directory_succeeds_after_failed_append() {
+    init_logger();
+
+    let data_large = std::fs::read(BINARY_PATH_LARGE).unwrap();
+    let image_large = Image::parse(&data_large[..]).unwrap();
+    let mut data = std::fs::read(BINARY_PATH_SMALL).unwrap();
+    let image = Image::parse(&data[..]).unwrap();
+    let first_section_offset = section_header_offset(&image, 0);
+    let pointer_to_raw_data_offset = first_section_offset
+        + size_of::<u64>()
+        + size_of::<u32>()
+        + size_of::<u32>()
+        + size_of::<u32>();
+    let section_table_end =
+        section_header_offset(&image, image.coff_header().number_of_sections as usize);
+    let constrained_section_start = section_table_end + 20;
+    data[pointer_to_raw_data_offset..pointer_to_raw_data_offset + size_of::<u32>()]
+        .copy_from_slice(&(constrained_section_start as u32).to_le_bytes());
+
+    let mut image = Image::parse(data).unwrap();
+    let original_section_count = image.coff_header().number_of_sections;
+    let original_resources = image.resource_directory().cloned().unwrap();
+    let source = image_large.resource_directory().cloned().unwrap();
+    let mut larger_resources = original_resources.clone();
+    larger_resources.root_mut().insert(
+        ResourceEntryName::ID(24),
+        source.root().get(ResourceEntryName::ID(24)).unwrap().clone(),
+    );
+
+    let result = image.set_resource_directory(larger_resources);
+    assert!(
+        matches!(result, Err(ImageWriteError::NotEnoughSpaceInHeader)),
+        "append fails when the header has only 20 free bytes: {result:?}"
+    );
+
+    let previous = image.set_resource_directory(original_resources.clone()).unwrap();
+    assert_eq!(
+        previous,
+        Some(original_resources),
+        "successful retry returns original resources"
+    );
+    assert_eq!(
+        image.coff_header().number_of_sections,
+        original_section_count,
+        "successful retry updates the resource section in place"
+    );
+    let reparsed = Image::parse(image.data()).unwrap();
+    assert_eq!(image, reparsed, "image reparses after retrying a failed write");
+}
+
+#[test]
+fn set_resource_directory_preserves_shared_section() {
+    init_logger();
+
+    let data = std::fs::read(BINARY_PATH_SMALL).unwrap();
+    let image = Image::parse(&data[..]).unwrap();
+    let resource_data_directory = *image.data_directory(DataDirectoryType::ResourceTable).unwrap();
+    let resource_section = *image
+        .section_header_for_data_directory(DataDirectoryType::ResourceTable)
+        .unwrap();
+    let resource_section_data = data[resource_section.pointer_to_raw_data as usize
+        ..(resource_section.pointer_to_raw_data + resource_section.size_of_raw_data) as usize]
+        .to_vec();
+    let import_directory_offset = data_directory_offset(&image, 1);
+    let mut data = data;
+    // point import directory header to resource directory
+    data[import_directory_offset..import_directory_offset + size_of::<u32>()]
+        .copy_from_slice(&resource_data_directory.virtual_address.to_le_bytes());
+    data[import_directory_offset + size_of::<u32>()
+        ..import_directory_offset + size_of::<ImageDataDirectory>()]
+        .copy_from_slice(&resource_data_directory.size.to_le_bytes());
+
+    let mut image = Image::parse(data).unwrap();
+    let original_section_count = image.coff_header().number_of_sections;
+    let resources = image.resource_directory().cloned().unwrap();
+    image.set_resource_directory(resources).unwrap();
+
+    assert_eq!(
+        image.coff_header().number_of_sections,
+        original_section_count + 1,
+        "shared resource section causes a new section to be added"
+    );
+    assert_eq!(
+        &image.data()[resource_section.pointer_to_raw_data as usize
+            ..(resource_section.pointer_to_raw_data + resource_section.size_of_raw_data) as usize],
+        resource_section_data,
+        "original shared section data is preserved"
+    );
+    assert_eq!(
+        image.data_directory(DataDirectoryType::ImportTable).unwrap().virtual_address,
+        resource_data_directory.virtual_address,
+        "other data directory continues to reference the original section"
+    );
+    assert_ne!(
+        image.data_directory(DataDirectoryType::ResourceTable).unwrap().virtual_address,
+        resource_data_directory.virtual_address,
+        "resource directory moves to the new section"
     );
 }
 
