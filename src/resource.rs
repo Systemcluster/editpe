@@ -18,6 +18,8 @@ use zerocopy::IntoBytes;
 #[cfg(feature = "images")]
 pub use image::DynamicImage;
 
+use crate::util::u16_string_len;
+
 /// Trait for data types that can be converted to icon data.
 ///
 /// This trait is implemented for `&[u8]`, `Vec<u8>`, and for `DynamicImage` when the `images` feature is enabled.
@@ -108,7 +110,8 @@ impl ResourceDirectory {
     pub fn parse(
         image: &[u8], base_address: u32, virtual_address: u32,
     ) -> Result<Self, ImageReadError> {
-        let root = ResourceTable::parse(image, base_address, virtual_address, 0, 0)?;
+        let root =
+            ResourceTable::parse(image, base_address, virtual_address, 0, 0, &mut Vec::new())?;
         Ok(Self {
             virtual_address,
             root,
@@ -833,84 +836,148 @@ pub struct ResourceTable {
 impl ResourceTable {
     fn parse(
         image: &[u8], base_address: u32, virtual_address: u32, directory_offset: u32, level: usize,
+        ancestors: &mut Vec<u32>,
     ) -> Result<Self, ImageReadError> {
-        let table_offset = base_address + directory_offset;
-        let resource_table = read::<ResourceDirectoryTable>(&image[table_offset as usize..])?;
-        trace!("{} {:#x?}", "--".repeat(level + 1), resource_table);
+        let table_offset = base_address.checked_add(directory_offset).ok_or_else(|| {
+            ReadError(format!(
+                "resource table offset {base_address:#x} + {directory_offset:#x} overflows"
+            ))
+        })?;
+        if ancestors.contains(&table_offset) {
+            return Err(ReadError(format!(
+                "resource table cycle detected at offset {table_offset:#x}"
+            ))
+            .into());
+        }
+        ancestors.push(table_offset);
 
-        let mut entries = IndexMap::default();
+        let result = (|| {
+            let resource_table = read_at::<ResourceDirectoryTable>(image, table_offset as usize)?;
+            trace!("{} {:#x?}", "--".repeat(level + 1), resource_table);
 
-        let num_entries = resource_table.number_of_name_entries as u32
-            + resource_table.number_of_id_entries as u32;
-        let mut entry_offset = table_offset + 16;
-        for _ in 0..num_entries {
-            let entry = read::<ResourceDirectoryEntry>(&image[entry_offset as usize..])?;
-            trace!("{} {:#x?}", "--".repeat(level + 1), entry);
+            let mut entries = IndexMap::default();
 
-            if entry.data_entry_or_subdirectory_offset & 0x80000000 != 0 {
-                entries.insert(
-                    ResourceEntryName::parse(image, base_address, entry.name_offset_or_integer_id)?,
-                    ResourceEntry::Table(ResourceTable::parse(
+            let num_entries = resource_table.number_of_name_entries as u32
+                + resource_table.number_of_id_entries as u32;
+            let mut entry_offset = table_offset.checked_add(16).ok_or_else(|| {
+                ReadError(format!("resource entry offset at {table_offset:#x} overflows"))
+            })?;
+            for _ in 0..num_entries {
+                let entry = read_at::<ResourceDirectoryEntry>(image, entry_offset as usize)?;
+                trace!("{} {:#x?}", "--".repeat(level + 1), entry);
+                entry_offset = entry_offset
+                    .checked_add(8)
+                    .ok_or_else(|| ReadError("resource entry offset overflows".into()))?;
+
+                let name = match ResourceEntryName::parse(
+                    image,
+                    base_address,
+                    entry.name_offset_or_integer_id,
+                ) {
+                    Ok(name) => name,
+                    Err(error) => {
+                        warn!(
+                            "{} skipping invalid resource name: {error:?}",
+                            "--".repeat(level + 1)
+                        );
+                        continue;
+                    }
+                };
+
+                if entry.data_entry_or_subdirectory_offset & 0x80000000 != 0 {
+                    match ResourceTable::parse(
                         image,
                         base_address,
                         virtual_address,
                         entry.data_entry_or_subdirectory_offset ^ 0x80000000,
                         level + 1,
-                    )?),
-                );
-            } else {
-                trace!(
-                    "reading {} bytes at {} (image size {})",
-                    size_of::<ResourceDataEntry>(),
-                    base_address + entry.data_entry_or_subdirectory_offset,
-                    image.len()
-                );
-                let data = read::<ResourceDataEntry>(
-                    &image[(base_address + entry.data_entry_or_subdirectory_offset) as usize..],
-                )?;
-                // calculate as i64 and convert to u64 first to check for padding
-                let address = base_address as i64 + data.data_rva as i64 - virtual_address as i64;
-                let mut address = address as u64;
-                if address & 0xffffffffff000000 == 0xffffffffff000000 {
-                    warn!(
-                        "{} resource data entry address {:#x?} seems to be packed, ignoring padding",
-                        "--".repeat(level + 1),
-                        address
-                    );
-                    address ^= 0xffffffffff000000;
-                }
-                trace!("{} {:#x?} {:#x?}", "--".repeat(level + 1), address, data);
-                if address + data.size as u64 > image.len() as u64 {
-                    error!(
-                        "{} resource data entry address {:#x?} with size {:#x?} ({:#x?}) outside valid range ({:#x?})",
-                        "--".repeat(level + 1),
-                        address,
-                        data.size,
-                        address + data.size as u64,
+                        ancestors,
+                    ) {
+                        Ok(table) => {
+                            entries.insert(name, ResourceEntry::Table(table));
+                        }
+                        Err(error) => warn!(
+                            "{} skipping invalid resource subdirectory: {error:?}",
+                            "--".repeat(level + 1)
+                        ),
+                    }
+                } else {
+                    let data_entry_offset =
+                        match base_address.checked_add(entry.data_entry_or_subdirectory_offset) {
+                            Some(offset) => offset,
+                            None => {
+                                warn!(
+                                    "{} skipping resource data entry with overflowing offset",
+                                    "--".repeat(level + 1)
+                                );
+                                continue;
+                            }
+                        };
+                    trace!(
+                        "reading {} bytes at {} (image size {})",
+                        size_of::<ResourceDataEntry>(),
+                        data_entry_offset,
                         image.len()
                     );
-                    continue;
+                    let data = match read_at::<ResourceDataEntry>(image, data_entry_offset as usize)
+                    {
+                        Ok(data) => data,
+                        Err(error) => {
+                            warn!(
+                                "{} skipping invalid resource data entry: {error:?}",
+                                "--".repeat(level + 1)
+                            );
+                            continue;
+                        }
+                    };
+                    // calculate as i64 and convert to u64 first to check for padding
+                    let address =
+                        base_address as i64 + data.data_rva as i64 - virtual_address as i64;
+                    let mut address = address as u64;
+                    if address & 0xffffffffff000000 == 0xffffffffff000000 {
+                        warn!(
+                            "{} resource data entry address {:#x?} seems to be packed, ignoring padding",
+                            "--".repeat(level + 1),
+                            address
+                        );
+                        address ^= 0xffffffffff000000;
+                    }
+                    trace!("{} {:#x?} {:#x?}", "--".repeat(level + 1), address, data);
+                    let resource_data = usize::try_from(address)
+                        .ok()
+                        .and_then(|address| checked_slice(image, address, data.size as usize).ok());
+                    let Some(resource_data) = resource_data else {
+                        warn!(
+                            "{} skipping resource data outside the image",
+                            "--".repeat(level + 1)
+                        );
+                        continue;
+                    };
+                    entries.insert(
+                        name,
+                        ResourceEntry::Data(ResourceData {
+                            codepage: data.codepage,
+                            reserved: data.reserved,
+                            data:     resource_data.to_vec().into(),
+                        }),
+                    );
                 }
-                let address = address as u32;
-                entries.insert(
-                    ResourceEntryName::parse(image, base_address, entry.name_offset_or_integer_id)?,
-                    ResourceEntry::Data(ResourceData {
-                        codepage: data.codepage,
-                        reserved: data.reserved,
-                        data:     Vec::from(
-                            &image[address as usize..(address + data.size) as usize],
-                        )
-                        .into(),
-                    }),
-                );
             }
+            let mut normalized_table = resource_table;
+            normalized_table.number_of_name_entries =
+                entries.keys().filter(|name| matches!(name, ResourceEntryName::Name(_))).count()
+                    as u16;
+            normalized_table.number_of_id_entries =
+                entries.keys().filter(|name| matches!(name, ResourceEntryName::ID(_))).count()
+                    as u16;
+            Ok(Self {
+                data: normalized_table,
+                entries,
+            })
+        })();
 
-            entry_offset += 8;
-        }
-        Ok(Self {
-            data: resource_table,
-            entries,
-        })
+        ancestors.pop();
+        result
     }
 
     fn build(&self, virtual_address: u32) -> Vec<u8> {
@@ -1311,11 +1378,17 @@ impl ResourceEntryName {
     fn parse(image: &[u8], offset: u32, id: u32) -> Result<Self, ReadError> {
         if id & 0x80000000 != 0 {
             trace!("reading resource name {:#x?}", id);
-            let address = offset + (id ^ 0x80000000);
-            let length = read::<u16>(&image[address as usize..])? as u32;
+            let address = offset
+                .checked_add(id ^ 0x80000000)
+                .ok_or_else(|| ReadError("resource name offset overflows".into()))?;
+            let length = read_at::<u16>(image, address as usize)? as usize;
             trace!("resource name length: {}", length);
             // size is in 16 bit characters so it needs to be doubled
-            let data = &image[address as usize..(address + 2 + (length * 2)) as usize];
+            let byte_length = length
+                .checked_mul(2)
+                .and_then(|length| length.checked_add(2))
+                .ok_or_else(|| ReadError("resource name length overflows".into()))?;
+            let data = checked_slice(image, address as usize, byte_length)?;
             trace!("resource name: {:x?}", data);
             Ok(Self::Name(data.to_vec()))
         } else {
@@ -1386,6 +1459,28 @@ pub struct VersionInfo {
     pub strings: Vec<VersionStringTable>,
     pub vars:    Vec<VersionU16>,
 }
+
+fn version_block_end(
+    start: usize, length: u16, parent_end: usize, name: &str,
+) -> Result<usize, ReadError> {
+    if (length as usize) < size_of::<VersionHeader>() {
+        return Err(ReadError(format!("{name} length is smaller than its header")));
+    }
+    let end = start
+        .checked_add(length as usize)
+        .ok_or_else(|| ReadError(format!("{name} length overflows")))?;
+    if end > parent_end {
+        return Err(ReadError(format!("{name} end {end:#x} exceeds parent end {parent_end:#x}")));
+    }
+    Ok(end)
+}
+
+fn version_length(value: usize, name: &str) -> Result<u16, ResourceError> {
+    u16::try_from(value).map_err(|_| {
+        ResourceError::InvalidBytes(ReadError(format!("{name} exceeds the 65535-byte limit")))
+    })
+}
+
 impl VersionInfo {
     /// Parse the version info resource from a byte slice.
     ///
@@ -1394,21 +1489,16 @@ impl VersionInfo {
     pub fn parse(data: &[u8]) -> Result<Self, ReadError> {
         // read the version root header
         let header = read::<VersionHeader>(data)?;
-        if header.length as usize > data.len() {
-            return Err(ReadError(format!(
-                "version root length {:#x?} is larger than data length {:#x?}",
-                header.length,
-                data.len()
-            )));
-        }
+        let root_end = version_block_end(0, header.length, data.len(), "version root")?;
+        let data = checked_slice(data, 0, root_end)?;
 
         let version_root_key =
-            read_u16_string(&data[size_of::<VersionHeader>()..size_of::<VersionHeader>() + 32])?;
+            read_u16_string(checked_slice(data, size_of::<VersionHeader>(), 32)?)?;
         if version_root_key != "VS_VERSION_INFO" {
             return Err(ReadError(format!("invalid version root key: {:?}", version_root_key)));
         }
         let value_offset =
-            aligned_to(size_of::<VersionHeader>() + version_root_key.len() * 2 + 2, 4);
+            aligned_to(size_of::<VersionHeader>() + u16_string_len(&version_root_key) * 2 + 2, 4);
 
         // read the fixed file info
         if header.value_length != size_of::<FixedFileInfo>() as u16 {
@@ -1417,7 +1507,7 @@ impl VersionInfo {
                 header.value_length
             )));
         }
-        let info = read::<FixedFileInfo>(&data[value_offset..])?;
+        let info = read_at::<FixedFileInfo>(data, value_offset)?;
         if info.signature != 0xfeef04bd {
             return Err(ReadError(format!(
                 "invalid fixed file info signature: {:#x?}",
@@ -1432,49 +1522,87 @@ impl VersionInfo {
 
         while child_offset < data.len() {
             // read the file info header
-            let file_info_header = read::<VersionHeader>(&data[child_offset..])?;
-            let file_info_end = child_offset + file_info_header.length as usize;
+            let file_info_header = read_at::<VersionHeader>(data, child_offset)?;
+            let file_info_end = version_block_end(
+                child_offset,
+                file_info_header.length,
+                data.len(),
+                "version child",
+            )?;
+            let key_offset = child_offset + size_of::<VersionHeader>();
             let file_info_key =
-                read_u16_string(&data[child_offset + size_of::<VersionHeader>()..file_info_end])?;
+                read_u16_string(checked_slice(data, key_offset, file_info_end - key_offset)?)?;
             let mut tables_offset = aligned_to(
-                child_offset + size_of::<VersionHeader>() + file_info_key.len() * 2 + 2,
+                child_offset + size_of::<VersionHeader>() + u16_string_len(&file_info_key) * 2 + 2,
                 4,
             );
+            if tables_offset > file_info_end {
+                return Err(ReadError("version child key exceeds its block".into()));
+            }
 
             match file_info_key.as_str() {
                 "VarFileInfo" => {
-                    let var_header = read::<VersionHeader>(&data[tables_offset..])?;
-                    let var_end = tables_offset + var_header.length as usize;
-                    let table_key = read_u16_string(
-                        &data[tables_offset + size_of::<VersionHeader>()..var_end],
+                    let var_header = read_at::<VersionHeader>(data, tables_offset)?;
+                    let var_end = version_block_end(
+                        tables_offset,
+                        var_header.length,
+                        file_info_end,
+                        "translation table",
                     )?;
+                    let key_offset = tables_offset + size_of::<VersionHeader>();
+                    let table_key =
+                        read_u16_string(checked_slice(data, key_offset, var_end - key_offset)?)?;
                     if &table_key != "Translation" {
                         return Err(ReadError(format!("invalid var table key: {:?}", table_key)));
                     }
                     let vars_offset = aligned_to(
-                        tables_offset + size_of::<VersionHeader>() + table_key.len() * 2 + 2,
+                        tables_offset
+                            + size_of::<VersionHeader>()
+                            + u16_string_len(&table_key) * 2
+                            + 2,
                         4,
                     );
+                    let vars_end = vars_offset
+                        .checked_add(var_header.value_length as usize)
+                        .ok_or_else(|| ReadError("translation value length overflows".into()))?;
+                    if vars_end > var_end
+                        || var_header.value_length as usize % size_of::<u32>() != 0
+                    {
+                        return Err(ReadError("invalid translation value length".into()));
+                    }
                     let mut var_offset = vars_offset;
-                    while var_offset < var_end {
-                        vars.push(read::<VersionU16>(&data[var_offset..])?);
+                    while var_offset < vars_end {
+                        vars.push(read_at::<VersionU16>(data, var_offset)?);
                         var_offset += size_of::<u32>();
                     }
                 }
                 "StringFileInfo" => {
-                    while tables_offset < child_offset + file_info_header.length as usize {
-                        let string_table_header = read::<VersionHeader>(&data[tables_offset..])?;
-                        let string_table_end = tables_offset + string_table_header.length as usize;
-                        let string_table_key = read_u16_string(
-                            &data[tables_offset + size_of::<VersionHeader>()..string_table_end],
+                    while tables_offset < file_info_end {
+                        let string_table_header = read_at::<VersionHeader>(data, tables_offset)?;
+                        let string_table_end = version_block_end(
+                            tables_offset,
+                            string_table_header.length,
+                            file_info_end,
+                            "version string table",
                         )?;
+                        let key_offset = tables_offset + size_of::<VersionHeader>();
+                        let string_table_key = read_u16_string(checked_slice(
+                            data,
+                            key_offset,
+                            string_table_end - key_offset,
+                        )?)?;
                         let strings_offset = aligned_to(
                             tables_offset
                                 + size_of::<VersionHeader>()
-                                + string_table_key.len() * 2
+                                + u16_string_len(&string_table_key) * 2
                                 + 2,
                             4,
                         );
+                        if strings_offset > string_table_end {
+                            return Err(ReadError(
+                                "version string table key exceeds its block".into(),
+                            ));
+                        }
 
                         let mut string_offset = strings_offset;
                         let mut string_table = VersionStringTable {
@@ -1483,32 +1611,49 @@ impl VersionInfo {
                         };
 
                         while string_offset < string_table_end {
-                            let string_header = read::<VersionHeader>(&data[string_offset..])?;
-                            string_offset += size_of::<VersionHeader>();
-                            let string_key = read_u16_string(
-                                &data[string_offset..string_offset + string_header.length as usize],
+                            let string_start = string_offset;
+                            let string_header = read_at::<VersionHeader>(data, string_start)?;
+                            let string_end = version_block_end(
+                                string_start,
+                                string_header.length,
+                                string_table_end,
+                                "version string",
                             )?;
-                            string_offset = aligned_to(string_offset + string_key.len() * 2 + 2, 4);
-
-                            if string_header.value_length == 0 {
-                                continue;
-                            }
-                            if string_header.type_ == 1 {
-                                let string_value = read_u16_string(
-                                    &data[string_offset
-                                        ..string_offset + string_header.value_length as usize * 2],
+                            let key_offset = string_start + size_of::<VersionHeader>();
+                            let string_key = read_u16_string(checked_slice(
+                                data,
+                                key_offset,
+                                string_end - key_offset,
+                            )?)?;
+                            let value_offset =
+                                aligned_to(key_offset + u16_string_len(&string_key) * 2 + 2, 4);
+                            let value_length =
+                                (string_header.value_length as usize).checked_mul(2).ok_or_else(
+                                    || ReadError("version string length overflows".into()),
                                 )?;
+                            let value_end = value_offset
+                                .checked_add(value_length)
+                                .ok_or_else(|| ReadError("version string end overflows".into()))?;
+                            if value_end > string_end {
+                                return Err(ReadError(
+                                    "version string value exceeds its block".into(),
+                                ));
+                            }
+
+                            if string_header.value_length > 0 && string_header.type_ == 1 {
+                                let string_value = read_u16_string(checked_slice(
+                                    data,
+                                    value_offset,
+                                    value_length,
+                                )?)?;
                                 string_table.strings.insert(string_key, string_value);
-                            } else {
+                            } else if string_header.value_length > 0 {
                                 error!(
                                     "invalid string value type: {:#x?} (expected 0x1)",
                                     string_header.type_
                                 );
                             };
-                            string_offset = aligned_to(
-                                string_offset + string_header.value_length as usize * 2,
-                                4,
-                            );
+                            string_offset = aligned_to(string_end, 4);
                         }
                         tables_offset = aligned_to(string_table_end, 4);
                         strings.push(string_table);

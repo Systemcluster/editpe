@@ -33,6 +33,106 @@ fn parse_image() {
 }
 
 #[test]
+fn parse_truncated_image_returns_error() {
+    let result = std::panic::catch_unwind(|| Image::parse(&b"MZ"[..]));
+    assert!(result.is_ok(), "truncated images must not panic");
+    assert!(result.unwrap().is_err(), "truncated images must return an error");
+
+    let mut data = vec![0; PE_PTR_OFFSET as usize + size_of::<u32>()];
+    data[..2].copy_from_slice(&PE_DOS_MAGIC.to_le_bytes());
+    data[PE_PTR_OFFSET as usize..].copy_from_slice(&u32::MAX.to_le_bytes());
+    let result = std::panic::catch_unwind(|| Image::parse(&data));
+    assert!(result.is_ok(), "out-of-range PE offsets must not panic");
+    assert!(result.unwrap().is_err(), "out-of-range PE offsets must return an error");
+}
+
+#[test]
+fn zero_alignment_allows_parsing_and_resource_writes() {
+    let data = std::fs::read(BINARY_PATH_SMALL).unwrap();
+    let standard_header_offset =
+        pe_signature_offset(&data) + size_of::<u32>() + size_of::<CoffHeader>();
+    let windows_header_offset = standard_header_offset + 24;
+    let section_alignment_offset = windows_header_offset + size_of::<u64>();
+    let file_alignment_offset = section_alignment_offset + size_of::<u32>();
+
+    for (name, offset) in [
+        ("section alignment", section_alignment_offset),
+        ("file alignment", file_alignment_offset),
+    ] {
+        let mut data = data.clone();
+        data[offset..offset + size_of::<u32>()].fill(0);
+
+        let mut image = Image::parse(data)
+            .unwrap_or_else(|error| panic!("{name} does not restrict data ingestion: {error}"));
+        let resources = image.resource_directory().cloned().expect("resources are still parsed");
+        image.set_resource_directory(resources).unwrap_or_else(|error| {
+            panic!("zero {name} does not prevent resource writes: {error}")
+        });
+    }
+}
+
+#[test]
+fn parse_invalid_optional_header_ranges_return_specific_errors() {
+    let data = std::fs::read(BINARY_PATH_SMALL).unwrap();
+    let standard_header_offset =
+        pe_signature_offset(&data) + size_of::<u32>() + size_of::<CoffHeader>();
+
+    let mut truncated = data.clone();
+    truncated.truncate(standard_header_offset + 112);
+    assert!(matches!(
+        Image::parse(truncated),
+        Err(ImageReadError::InvalidHeader(error)) if error == "optional header exceeds image"
+    ));
+
+    let mut undersized = data;
+    let optional_header_size_offset = pe_signature_offset(&undersized) + size_of::<u32>() + 16;
+    undersized[optional_header_size_offset..optional_header_size_offset + size_of::<u16>()]
+        .copy_from_slice(&112u16.to_le_bytes());
+    assert!(matches!(
+        Image::parse(undersized),
+        Err(ImageReadError::InvalidHeader(error))
+            if error == "data directories exceed the optional header"
+    ));
+}
+
+#[test]
+fn parse_invalid_resource_entry_is_skipped() {
+    let mut data = vec![0; size_of::<ResourceDirectoryTable>()];
+    data[14..16].copy_from_slice(&1u16.to_le_bytes());
+    data.extend_from_slice(&1u32.to_le_bytes());
+    data.extend_from_slice(&0x100u32.to_le_bytes());
+
+    let result = std::panic::catch_unwind(|| ResourceDirectory::parse(&data, 0, 0));
+    assert!(result.is_ok(), "invalid resource offsets must not panic");
+    let directory = result.unwrap().expect("invalid child entries do not reject the directory");
+    assert!(directory.root().entries().is_empty(), "invalid child entry is skipped");
+    let rebuilt = directory.build(0);
+    assert!(
+        ResourceDirectory::parse(&rebuilt, 0, 0).is_ok(),
+        "tolerantly parsed directories rebuild consistently"
+    );
+}
+
+#[test]
+fn parse_cyclic_resource_directory_is_skipped() {
+    let mut data = vec![0; size_of::<ResourceDirectoryTable>()];
+    data[14..16].copy_from_slice(&1u16.to_le_bytes());
+    data.extend_from_slice(&1u32.to_le_bytes());
+    data.extend_from_slice(&0x80000000u32.to_le_bytes());
+
+    let directory = ResourceDirectory::parse(&data, 0, 0).unwrap();
+    assert!(directory.root().entries().is_empty(), "cyclic child directories are skipped");
+}
+
+#[test]
+fn parse_truncated_version_info_returns_error() {
+    let data = [6, 0, size_of::<FixedFileInfo>() as u8, 0, 0, 0];
+    let result = std::panic::catch_unwind(|| VersionInfo::parse(&data));
+    assert!(result.is_ok(), "truncated version information must not panic");
+    assert!(result.unwrap().is_err(), "truncated version information must return an error");
+}
+
+#[test]
 fn query_resource_section() {
     init_logger();
 
@@ -168,12 +268,16 @@ fn set_resource_section() {
     assert_eq!(image, new_image, "original and rebuilt images equal");
 }
 
-fn pe32_base_of_data(data: &[u8]) -> u32 {
-    let pe_signature_offset = u32::from_le_bytes(
+fn pe_signature_offset(data: &[u8]) -> usize {
+    u32::from_le_bytes(
         data[PE_PTR_OFFSET as usize..PE_PTR_OFFSET as usize + size_of::<u32>()]
             .try_into()
             .unwrap(),
-    ) as usize;
+    ) as usize
+}
+
+fn pe32_base_of_data(data: &[u8]) -> u32 {
+    let pe_signature_offset = pe_signature_offset(data);
     // PE signature + COFF header + StandardHeader (through BaseOfCode) = BaseOfData
     let offset = pe_signature_offset
         + size_of::<u32>()

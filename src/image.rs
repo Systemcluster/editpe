@@ -77,30 +77,30 @@ impl<'a> Image<'a> {
     pub fn parse<R: Into<Cow<'a, [u8]>>>(image: R) -> Result<Self, ImageReadError> {
         let image = image.into();
 
-        let pe_dos_magic = read::<u16>(&image[0..])?;
+        let pe_dos_magic = read_at::<u16>(&image, 0)?;
         debug!("pe_dos_magic: {:#x?}", pe_dos_magic);
         if pe_dos_magic != PE_DOS_MAGIC {
             return Err(ImageReadError::InvalidHeader("no dos magic".into()));
         }
 
-        let pe_signature_offset = read::<u32>(&image[PE_PTR_OFFSET as usize..])?;
+        let pe_signature_offset = read_at::<u32>(&image, PE_PTR_OFFSET as usize)?;
         debug!("pe_signature_offset: {:#x?}", pe_signature_offset);
 
-        let pe_signature = read::<u32>(&image[pe_signature_offset as usize..])?;
+        let pe_signature = read_at::<u32>(&image, pe_signature_offset as usize)?;
         debug!("pe_signature: {:#x?}", pe_signature);
         if pe_signature != PE_NT_SIGNATURE {
             return Err(ImageReadError::InvalidHeader("no pe signature".into()));
         }
 
-        let coff_header_offset = (pe_signature_offset + 4) as u64;
-        let coff_header = read::<CoffHeader>(&image[coff_header_offset as usize..])?;
+        let coff_header_offset = u64::from(pe_signature_offset) + 4;
+        let coff_header = read_at::<CoffHeader>(&image, coff_header_offset as usize)?;
         debug!("{:#x?}: {:#x?}", coff_header_offset, coff_header);
         if coff_header.size_of_optional_header < 24 {
             return Err(ImageReadError::InvalidHeader("optional header too small".into()));
         }
 
         let standard_header_offset = coff_header_offset + 20;
-        let standard_header = read::<StandardHeader>(&image[standard_header_offset as usize..])?;
+        let standard_header = read_at::<StandardHeader>(&image, standard_header_offset as usize)?;
         debug!("{:#x?}: {:#x?}", standard_header_offset, standard_header);
 
         let (
@@ -112,7 +112,7 @@ impl<'a> Image<'a> {
             if standard_header.magic == PE_32_MAGIC && coff_header.size_of_optional_header >= 96 {
                 let windows_header_offset = standard_header_offset + 28;
                 let windows_header =
-                    read::<WindowsHeader<u32>>(&image[windows_header_offset as usize..])?;
+                    read_at::<WindowsHeader<u32>>(&image, windows_header_offset as usize)?;
                 (
                     windows_header_offset,
                     GenericWindowsHeader::WindowsHeader32(windows_header),
@@ -124,7 +124,7 @@ impl<'a> Image<'a> {
             {
                 let windows_header_offset = standard_header_offset + 24;
                 let windows_header =
-                    read::<WindowsHeader<u64>>(&image[windows_header_offset as usize..])?;
+                    read_at::<WindowsHeader<u64>>(&image, windows_header_offset as usize)?;
                 (
                     windows_header_offset,
                     GenericWindowsHeader::WindowsHeader64(windows_header),
@@ -137,9 +137,21 @@ impl<'a> Image<'a> {
         };
         debug!("{:#x?}: {:#x?}", windows_header_offset, windows_header);
 
-        if image.len() <= optional_header_dd_offset as usize {
+        let optional_header_end = standard_header_offset
+            .checked_add(u64::from(coff_header.size_of_optional_header))
+            .ok_or_else(|| ImageReadError::InvalidHeader("optional header end overflows".into()))?;
+        let data_directory_count = u64::from(number_of_rva_and_sizes.min(16));
+        let data_directories_end = optional_header_dd_offset
+            .checked_add(data_directory_count * size_of::<ImageDataDirectory>() as u64)
+            .ok_or_else(|| {
+                ImageReadError::InvalidHeader("data directory table end overflows".into())
+            })?;
+        if optional_header_end > image.len() as u64 {
+            return Err(ImageReadError::InvalidHeader("optional header exceeds image".into()));
+        }
+        if data_directories_end > optional_header_end {
             return Err(ImageReadError::InvalidHeader(
-                "image truncated after optional header".into(),
+                "data directories exceed the optional header".into(),
             ));
         }
 
@@ -172,7 +184,7 @@ impl<'a> Image<'a> {
         {
             if (index as u32) < number_of_rva_and_sizes {
                 let offset = optional_header_dd_offset + (index as u64 * 8);
-                let data = read::<ImageDataDirectory>(&image[offset as usize..])?;
+                let data = read_at::<ImageDataDirectory>(&image, offset as usize)?;
                 header_data_directory.insert(header, data);
                 debug!("{:#x?}: {:?}: {:#x?}", offset, header, data);
             }
@@ -183,7 +195,7 @@ impl<'a> Image<'a> {
         let mut section_table = Vec::new();
         for index in 0..coff_header.number_of_sections {
             let section_table_offset = section_table_offset + (index as u64 * 40);
-            let section_header = read::<SectionHeader>(&image[section_table_offset as usize..])?;
+            let section_header = read_at::<SectionHeader>(&image, section_table_offset as usize)?;
             debug!(
                 "{:#x?}: {}: {:#x?}",
                 section_table_offset,
@@ -200,10 +212,10 @@ impl<'a> Image<'a> {
         if let Some(resource_data) = header_data_directory.get(&DataDirectoryType::ResourceTable) {
             if resource_data.virtual_address > 0 && resource_data.size > 0 {
                 for section_table in section_table.iter() {
-                    if resource_data.virtual_address >= section_table.virtual_address
-                        && resource_data.virtual_address
-                            < section_table.virtual_address + section_table.virtual_size
-                    {
+                    let resource_address = u64::from(resource_data.virtual_address);
+                    let section_start = u64::from(section_table.virtual_address);
+                    let section_end = section_start + u64::from(section_table.virtual_size);
+                    if resource_address >= section_start && resource_address < section_end {
                         debug!(
                             "found resource directory in {} section: {:#x?}",
                             section_table.name().unwrap_or("?".to_string()),
@@ -792,10 +804,10 @@ impl<'a> Image<'a> {
     ) -> Option<&SectionHeader> {
         if let Some(data_directory) = self.data_directory(directory) {
             for section_table in self.section_table.iter() {
-                if data_directory.virtual_address >= section_table.virtual_address
-                    && data_directory.virtual_address
-                        < section_table.virtual_address + section_table.virtual_size
-                {
+                let directory_address = u64::from(data_directory.virtual_address);
+                let section_start = u64::from(section_table.virtual_address);
+                let section_end = section_start + u64::from(section_table.virtual_size);
+                if directory_address >= section_start && directory_address < section_end {
                     return Some(section_table);
                 }
             }
