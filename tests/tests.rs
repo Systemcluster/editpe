@@ -168,33 +168,73 @@ fn set_resource_section() {
     assert_eq!(image, new_image, "original and rebuilt images equal");
 }
 
+fn pe32_base_of_data(data: &[u8]) -> u32 {
+    let pe_signature_offset = u32::from_le_bytes(
+        data[PE_PTR_OFFSET as usize..PE_PTR_OFFSET as usize + size_of::<u32>()]
+            .try_into()
+            .unwrap(),
+    ) as usize;
+    // PE signature + COFF header + StandardHeader (through BaseOfCode) = BaseOfData
+    let offset = pe_signature_offset
+        + size_of::<u32>()
+        + size_of::<CoffHeader>()
+        + size_of::<StandardHeader>();
+    u32::from_le_bytes(data[offset..offset + size_of::<u32>()].try_into().unwrap())
+}
+
+fn expected_size_of_image(image: &Image<'_>) -> u32 {
+    let alignment = u64::from(image.windows_header().section_alignment());
+    assert!(alignment > 0, "section alignment must be non-zero");
+    let max_end = image
+        .section_table()
+        .iter()
+        .map(|section| u64::from(section.virtual_address) + u64::from(section.virtual_size))
+        .max()
+        .unwrap_or(0);
+    let aligned = if max_end % alignment == 0 {
+        max_end
+    } else {
+        max_end + alignment - (max_end % alignment)
+    };
+    u32::try_from(aligned).expect("expected SizeOfImage fits in u32")
+}
+
 #[test]
 fn set_pe32_resource_section() {
     init_logger();
 
     let data = std::fs::read(BINARY_PATH_SMALL_32).unwrap();
     let mut image = Image::parse(&data[..]).unwrap();
+    assert_eq!(image.standard_header().magic, PE_32_MAGIC, "fixture is PE32");
+
+    let original_base_of_data = pe32_base_of_data(&data);
     let resource_directory = image.resource_directory().cloned().unwrap();
     image.set_resource_directory(resource_directory).unwrap();
 
     let new_data = image.data();
     assert_eq!(data.len(), new_data.len(), "original and rebuilt PE32 data size equal");
+    assert_eq!(
+        pe32_base_of_data(new_data),
+        original_base_of_data,
+        "PE32 BaseOfData DWORD is preserved across rewrite"
+    );
 
     let new_image = Image::parse(new_data).unwrap();
     assert_eq!(image, new_image, "original and rebuilt PE32 images equal");
 }
 
 #[test]
-fn set_resource_section_with_overflowing_image_size() {
+fn set_resource_section_rejects_invalid_section_layout() {
     init_logger();
 
-    for (virtual_size, description) in [
-        (0x2000_u32, "virtual section extent"),
-        (0x0800_u32, "aligned image size"),
-    ] {
-        let mut data = std::fs::read(BINARY_PATH_SMALL).unwrap();
+    for binary_path in [BINARY_PATH_SMALL, BINARY_PATH_SMALL_32] {
+        let data = std::fs::read(binary_path).unwrap();
         let image = Image::parse(&data[..]).unwrap();
-        let original_image_size = image.windows_header().size_of_image();
+        let section_alignment = image.windows_header().section_alignment();
+        assert_eq!(
+            section_alignment, 0x1000,
+            "overflow fixture depends on 0x1000 section alignment ({binary_path})"
+        );
 
         let pe_signature_offset = u32::from_le_bytes(
             data[PE_PTR_OFFSET as usize..PE_PTR_OFFSET as usize + size_of::<u32>()]
@@ -206,23 +246,56 @@ fn set_resource_section_with_overflowing_image_size() {
             + size_of::<CoffHeader>()
             + image.coff_header().size_of_optional_header as usize
             + (image.coff_header().number_of_sections as usize - 1) * size_of::<SectionHeader>();
+        // SectionHeader: Name(8) VirtualSize(4) VirtualAddress(4) ...
         let virtual_size_offset = last_section_offset + size_of::<u64>();
         let virtual_address_offset = virtual_size_offset + size_of::<u32>();
-
-        data[virtual_size_offset..virtual_size_offset + size_of::<u32>()]
-            .copy_from_slice(&virtual_size.to_le_bytes());
-        data[virtual_address_offset..virtual_address_offset + size_of::<u32>()]
-            .copy_from_slice(&0xffff_f000_u32.to_le_bytes());
-
-        let mut image = Image::parse(&data[..]).unwrap();
-        let resource_directory = image.resource_directory().cloned().unwrap();
-        image.set_resource_directory(resource_directory).unwrap();
-
-        assert_eq!(
-            image.windows_header().size_of_image(),
-            original_image_size,
-            "original image size is preserved when {description} overflows"
+        let last_section_va = u32::from_le_bytes(
+            data[virtual_address_offset..virtual_address_offset + size_of::<u32>()]
+                .try_into()
+                .unwrap(),
         );
+
+        let mut cases = vec![(last_section_va, 0xffff_f800_u64, false, "aligned image size")];
+        if binary_path == BINARY_PATH_SMALL {
+            cases.push((0xffff_f000, 0x1_0000_1000_u64, true, "virtual section extent"));
+        }
+
+        for (virtual_address, virtual_end, virtual_extent_overflows, description) in cases {
+            let virtual_size = u32::try_from(virtual_end - u64::from(virtual_address))
+                .expect("virtual size fits in u32");
+            let computed_virtual_end = u64::from(virtual_address) + u64::from(virtual_size);
+            let alignment = u64::from(section_alignment);
+            let aligned_image_size =
+                computed_virtual_end + (alignment - computed_virtual_end % alignment) % alignment;
+
+            assert!(
+                aligned_image_size > u64::from(u32::MAX),
+                "fixture makes aligned SizeOfImage exceed the PE address space ({binary_path})"
+            );
+            assert_eq!(
+                virtual_end > u64::from(u32::MAX),
+                virtual_extent_overflows,
+                "fixture marks whether the virtual section extent itself exceeds the PE address space ({binary_path})"
+            );
+
+            let mut data = data.clone();
+            data[virtual_size_offset..virtual_size_offset + size_of::<u32>()]
+                .copy_from_slice(&virtual_size.to_le_bytes());
+            data[virtual_address_offset..virtual_address_offset + size_of::<u32>()]
+                .copy_from_slice(&virtual_address.to_le_bytes());
+
+            let mut image = Image::parse(&data[..]).unwrap();
+            assert!(
+                image.resource_directory().is_some(),
+                "resource directory can be parsed with an invalid virtual size ({binary_path})"
+            );
+            let resource_directory = image.resource_directory().cloned().unwrap();
+            let result = image.set_resource_directory(resource_directory);
+            assert!(
+                matches!(result, Err(ImageWriteError::InvalidSectionRange(_, _))),
+                "set_resource_directory errors when {description} overflows ({binary_path}): {result:?}"
+            );
+        }
     }
 }
 
@@ -291,6 +364,7 @@ fn transfer_resource_section_large() {
         ResourceEntryName::ID(24),
         source_resource_directory.root().get(ResourceEntryName::ID(24)).unwrap().clone(),
     );
+    let previous_size_of_image = image_small.windows_header().size_of_image();
     image_small.set_resource_directory(target_resource_directory.clone()).unwrap();
 
     let section_alignment = image_small.windows_header().section_alignment();
@@ -299,6 +373,15 @@ fn transfer_resource_section_large() {
         size_of_image % section_alignment,
         0,
         "image size is aligned to section boundaries"
+    );
+    assert_eq!(
+        size_of_image,
+        expected_size_of_image(&image_small),
+        "SizeOfImage equals align(max(VA + VS), SectionAlignment)"
+    );
+    assert!(
+        size_of_image >= previous_size_of_image,
+        "SizeOfImage does not shrink when growing resource section"
     );
 
     let data_small_rebuilt = image_small.data();
@@ -321,6 +404,64 @@ fn transfer_resource_section_large() {
         data_small_rebuilt.len(),
         data_small_rebuilt_rebuilt.len(),
         "data size after setting same resource directory again equal"
+    );
+}
+
+#[test]
+fn set_resource_directory_repeated_without_reparse() {
+    init_logger();
+
+    // smallbin has .rsrc followed by .reloc, so growing resources adds a new section
+    let data_large = std::fs::read(BINARY_PATH_LARGE).unwrap();
+    let image_large = Image::parse(&data_large[..]).unwrap();
+    let data_small = std::fs::read(BINARY_PATH_SMALL).unwrap();
+    let mut image_small = Image::parse(&data_small[..]).unwrap();
+    let original_section_count = image_small.coff_header().number_of_sections;
+
+    let source = image_large.resource_directory().cloned().unwrap();
+    let mut target = image_small.resource_directory().cloned().unwrap();
+    target.root_mut().insert(
+        ResourceEntryName::ID(24),
+        source.root().get(ResourceEntryName::ID(24)).unwrap().clone(),
+    );
+
+    image_small.set_resource_directory(target.clone()).unwrap();
+    let after_first = image_small.data().to_vec();
+    assert_eq!(
+        image_small.coff_header().number_of_sections,
+        original_section_count + 1,
+        "first write appends a resource section"
+    );
+    assert!(
+        after_first.len() > data_small.len(),
+        "first write grows the image (new section path)"
+    );
+
+    // second setting of resource should keep the same size
+    image_small.set_resource_directory(target.clone()).unwrap();
+    let after_second = image_small.data().to_vec();
+    assert_eq!(
+        after_first.len(),
+        after_second.len(),
+        "second same-size write does not change file length"
+    );
+    assert_eq!(after_first, after_second, "second same-resource-directory write equals in data");
+
+    let reparsed = Image::parse(&after_second[..]).unwrap();
+    assert_eq!(
+        image_small.resource_directory().unwrap().root(),
+        reparsed.resource_directory().unwrap().root(),
+        "resources survive double write without intermediate parse"
+    );
+    assert_eq!(
+        image_small.section_table(),
+        reparsed.section_table(),
+        "section table survives double write without intermediate parse"
+    );
+    assert_eq!(
+        reparsed.windows_header().size_of_image(),
+        expected_size_of_image(&reparsed),
+        "SizeOfImage remains consistent after double write"
     );
 }
 

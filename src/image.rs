@@ -171,7 +171,7 @@ impl<'a> Image<'a> {
         .enumerate()
         {
             if (index as u32) < number_of_rva_and_sizes {
-                let offset = optional_header_dd_offset + (index * 8) as u64;
+                let offset = optional_header_dd_offset + (index as u64 * 8);
                 let data = read::<ImageDataDirectory>(&image[offset as usize..])?;
                 header_data_directory.insert(header, data);
                 debug!("{:#x?}: {:?}: {:#x?}", offset, header, data);
@@ -179,10 +179,10 @@ impl<'a> Image<'a> {
         }
 
         let section_table_offset =
-            standard_header_offset + coff_header.size_of_optional_header as u64;
+            standard_header_offset + u64::from(coff_header.size_of_optional_header);
         let mut section_table = Vec::new();
         for index in 0..coff_header.number_of_sections {
-            let section_table_offset = section_table_offset + (index * 40) as u64;
+            let section_table_offset = section_table_offset + (index as u64 * 40);
             let section_header = read::<SectionHeader>(&image[section_table_offset as usize..])?;
             debug!(
                 "{:#x?}: {}: {:#x?}",
@@ -194,7 +194,7 @@ impl<'a> Image<'a> {
         }
 
         let directories_offset =
-            section_table_offset + (coff_header.number_of_sections * 40) as u64;
+            section_table_offset + (u64::from(coff_header.number_of_sections) * 40);
 
         let mut resource_directory = None;
         if let Some(resource_data) = header_data_directory.get(&DataDirectoryType::ResourceTable) {
@@ -287,6 +287,7 @@ impl<'a> Image<'a> {
     /// Returns the previous resource directory, or an error in the following cases:
     /// - Returns an error if the image could not be built. This can happen if there is not enough space in the image header to add a new section.
     /// - Returns an error if a section points to data outside the image.
+    /// - Returns an error if the section layout (next section RVA or `SizeOfImage`) exceeds the 32-bit PE address space.
     ///
     /// # Safety
     /// Replacing an existing resource directory may cause the resulting image to be invalid.
@@ -297,6 +298,7 @@ impl<'a> Image<'a> {
     pub fn set_resource_directory(
         &mut self, resource_directory: ResourceDirectory,
     ) -> Result<Option<ResourceDirectory>, ImageWriteError> {
+        let mut resource_directory = resource_directory;
         // copy to-be-modified data to allow erroring out without invalidating the image
         let mut coff_header = self.coff_header;
         let mut windows_header = self.windows_header;
@@ -304,6 +306,7 @@ impl<'a> Image<'a> {
         let mut section_table = self.section_table.clone();
 
         let mut required_header_space = 0;
+        let original_number_of_rva_and_sizes = windows_header.number_of_rva_and_sizes();
 
         // ensure that the data directory entry for the resource table exists
         use DataDirectoryType::*;
@@ -311,15 +314,38 @@ impl<'a> Image<'a> {
             if index + 1 > header_data_directory.len() {
                 debug!("adding missing header data directory: {:?}", header);
                 header_data_directory.insert(header, ImageDataDirectory::default());
-                required_header_space += 8;
             }
+        }
+        let old_optional_header_end = self.coff_header_offset
+            + size_of::<CoffHeader>() as u64
+            + u64::from(coff_header.size_of_optional_header);
+        let data_directories_end = self.optional_header_dd_offset
+            + (header_data_directory.len() * size_of::<ImageDataDirectory>()) as u64;
+        if data_directories_end > old_optional_header_end {
+            let additional_optional_header_space = data_directories_end - old_optional_header_end;
+            let new_optional_header_size =
+                u64::from(coff_header.size_of_optional_header) + additional_optional_header_space;
+            coff_header.size_of_optional_header =
+                u16::try_from(new_optional_header_size).map_err(|_| {
+                    ImageWriteError::InvalidSectionRange(
+                        new_optional_header_size,
+                        u64::from(u16::MAX),
+                    )
+                })?;
+            required_header_space += additional_optional_header_space;
         }
         let old_resource_data_directory =
             *header_data_directory.get(&DataDirectoryType::ResourceTable).unwrap();
 
         let new_resource_directory_size = resource_directory.size();
+        let aligned_resource_size = aligned_to(
+            u64::from(new_resource_directory_size),
+            u64::from(windows_header.file_alignment()),
+        );
         let new_resource_directory_size_aligned =
-            aligned_to(new_resource_directory_size, windows_header.file_alignment());
+            u32::try_from(aligned_resource_size).map_err(|_| {
+                ImageWriteError::InvalidSectionRange(aligned_resource_size, u64::from(u32::MAX))
+            })?;
         debug!(
             "new resource data size: {:#x?} (aligned: {:#x?})",
             new_resource_directory_size, new_resource_directory_size_aligned
@@ -347,19 +373,25 @@ impl<'a> Image<'a> {
                 section_header.size_of_raw_data > 0 && section_header.pointer_to_raw_data > 0
             })
             .max_by_key(|section_header| {
-                section_header.pointer_to_raw_data + section_header.size_of_raw_data
+                u64::from(section_header.pointer_to_raw_data)
+                    + u64::from(section_header.size_of_raw_data)
             })
             .copied();
         let last_section_end = last_section
-            .map(|section| section.pointer_to_raw_data as usize + section.size_of_raw_data as usize)
-            .unwrap_or(self.image.len());
+            .map(|section| {
+                u64::from(section.pointer_to_raw_data) + u64::from(section.size_of_raw_data)
+            })
+            .unwrap_or(self.image.len() as u64);
 
-        if last_section_end > self.image.len() {
+        if last_section_end > self.image.len() as u64 {
             return Err(ImageWriteError::InvalidSectionRange(
-                last_section_end as u64,
+                last_section_end,
                 self.image.len() as u64,
             ));
         }
+        let last_section_end = usize::try_from(last_section_end).map_err(|_| {
+            ImageWriteError::InvalidSectionRange(last_section_end, self.image.len() as u64)
+        })?;
 
         let mut old_resource_section_start = 0;
         let mut old_resource_section_end = 0;
@@ -371,10 +403,10 @@ impl<'a> Image<'a> {
             );
             // search for the section containing the resource directory
             for section_header in section_table.iter_mut() {
-                if old_resource_data_directory.virtual_address >= section_header.virtual_address
-                    && old_resource_data_directory.virtual_address
-                        < section_header.virtual_address + section_header.virtual_size
-                {
+                let resource_address = u64::from(old_resource_data_directory.virtual_address);
+                let section_start = u64::from(section_header.virtual_address);
+                let section_end = section_start + u64::from(section_header.virtual_size);
+                if resource_address >= section_start && resource_address < section_end {
                     debug!(
                         "found existing resource directory in {} section: {:#x?}",
                         section_header.name().unwrap_or("?".to_string()),
@@ -394,8 +426,10 @@ impl<'a> Image<'a> {
         if let Some(ref mut old_resource_section) = old_resource_section {
             // an existing resource section was found
             let last_section = last_section.unwrap();
-            let is_last_section = last_section.pointer_to_raw_data + last_section.size_of_raw_data
-                == old_resource_section.pointer_to_raw_data + old_resource_section.size_of_raw_data;
+            let is_last_section = u64::from(last_section.pointer_to_raw_data)
+                + u64::from(last_section.size_of_raw_data)
+                == u64::from(old_resource_section.pointer_to_raw_data)
+                    + u64::from(old_resource_section.size_of_raw_data);
 
             // check if the existing section is large enough to hold the new resource directory
             // or if it is the last section and can be extended
@@ -421,11 +455,12 @@ impl<'a> Image<'a> {
             if !add_new_section {
                 // check for other sections also using the resource section
                 for (header, directory) in header_data_directory.iter() {
+                    let directory_address = u64::from(directory.virtual_address);
+                    let section_start = u64::from(old_resource_section.virtual_address);
+                    let section_end = section_start + u64::from(old_resource_section.virtual_size);
                     if header != &ResourceTable
-                        && directory.virtual_address >= old_resource_section.virtual_address
-                        && directory.virtual_address
-                            < old_resource_section.virtual_address
-                                + old_resource_section.virtual_size
+                        && directory_address >= section_start
+                        && directory_address < section_end
                     {
                         info!("resource section also used by data directory {:?}", header);
                         multiple_data_directories = true;
@@ -437,6 +472,7 @@ impl<'a> Image<'a> {
                     debug!("resource section only used by the resource table, overwriting section");
                     let resource_dd =
                         header_data_directory.get_mut(&DataDirectoryType::ResourceTable).unwrap();
+                    resource_dd.size = new_resource_directory_size;
 
                     if old_resource_data_directory.size >= new_resource_directory_size {
                         resource_section_data =
@@ -450,11 +486,14 @@ impl<'a> Image<'a> {
                                 "resource section is not the last section and smaller than the existing section, padding section with existing data"
                             );
                             // pad the section to the previous section size with existing data
+                            let preserved_data_start = old_resource_section_start
+                                .checked_add(new_resource_directory_size as usize)
+                                .ok_or(ImageWriteError::InvalidSectionRange(
+                                    u64::MAX,
+                                    self.image.len() as u64,
+                                ))?;
                             resource_section_data.extend(
-                                &self.image[(old_resource_section.pointer_to_raw_data as usize
-                                    + new_resource_directory_size as usize)
-                                    ..(old_resource_section.pointer_to_raw_data as usize
-                                        + old_resource_section.size_of_raw_data as usize)],
+                                &self.image[preserved_data_start..old_resource_section_end],
                             );
                         } else if old_resource_section.size_of_raw_data
                             > new_resource_directory_size_aligned
@@ -463,7 +502,6 @@ impl<'a> Image<'a> {
                                 "resource section is the last section and smaller than the existing section, truncating section"
                             );
                             // adjust section size and virtual size header values
-                            resource_dd.size = new_resource_directory_size;
                             old_resource_section.virtual_size = new_resource_directory_size;
                             old_resource_section.size_of_raw_data =
                                 new_resource_directory_size_aligned;
@@ -478,7 +516,6 @@ impl<'a> Image<'a> {
                             resource_directory.build(old_resource_data_directory.virtual_address);
                         resource_section_data
                             .resize(new_resource_directory_size_aligned as usize, 0);
-                        resource_dd.size = new_resource_directory_size;
                         // adjust section size and virtual size header values
                         old_resource_section.virtual_size = new_resource_directory_size;
                         old_resource_section.size_of_raw_data = new_resource_directory_size_aligned;
@@ -495,29 +532,27 @@ impl<'a> Image<'a> {
             }
         }
 
+        let mut new_section_padding = 0;
         if add_new_section {
             debug!("adding new resource section");
-            if let Some(ref mut old_resource_section) = old_resource_section {
+            if old_resource_section.is_some() {
                 // copy existing resource section data that might be referenced by other data directories
-                resource_section_data.extend(
-                    &self.image[old_resource_section.pointer_to_raw_data as usize
-                        ..(old_resource_section.pointer_to_raw_data
-                            + old_resource_section.size_of_raw_data)
-                            as usize],
-                );
+                resource_section_data
+                    .extend(&self.image[old_resource_section_start..old_resource_section_end]);
             }
 
             let virtual_address = {
-                let last_virtual_section = section_table
+                let last_virtual_end = section_table
                     .iter()
-                    .max_by_key(|table| table.virtual_address + table.virtual_size);
-                if let Some(last_virtual_section) = last_virtual_section {
-                    last_virtual_section.virtual_address + last_virtual_section.virtual_size
-                } else {
-                    windows_header.section_alignment()
-                }
+                    .map(|table| u64::from(table.virtual_address) + u64::from(table.virtual_size))
+                    .max()
+                    .unwrap_or_else(|| u64::from(windows_header.section_alignment()));
+                let aligned =
+                    aligned_to(last_virtual_end, u64::from(windows_header.section_alignment()));
+                u32::try_from(aligned).map_err(|_| {
+                    ImageWriteError::InvalidSectionRange(aligned, u64::from(u32::MAX))
+                })?
             };
-            let virtual_address = aligned_to(virtual_address, windows_header.section_alignment());
 
             let resource_dd =
                 header_data_directory.get_mut(&DataDirectoryType::ResourceTable).unwrap();
@@ -526,9 +561,21 @@ impl<'a> Image<'a> {
 
             let pointer_to_raw_data = {
                 if let Some(last_section) = last_section {
-                    last_section.pointer_to_raw_data + last_section.size_of_raw_data
+                    let end = u64::from(last_section.pointer_to_raw_data)
+                        + u64::from(last_section.size_of_raw_data);
+                    let aligned = aligned_to(end, u64::from(windows_header.file_alignment()));
+                    new_section_padding = usize::try_from(aligned - end)
+                        .map_err(|_| ImageWriteError::InvalidSectionRange(aligned, u64::MAX))?;
+                    u32::try_from(aligned).map_err(|_| {
+                        ImageWriteError::InvalidSectionRange(aligned, u64::from(u32::MAX))
+                    })?
                 } else {
-                    self.directories_offset as u32
+                    u32::try_from(self.directories_offset).map_err(|_| {
+                        ImageWriteError::InvalidSectionRange(
+                            self.directories_offset,
+                            u64::from(u32::MAX),
+                        )
+                    })?
                 }
             };
             let new_section = SectionHeader {
@@ -544,7 +591,13 @@ impl<'a> Image<'a> {
             new_section_data = resource_directory.build(virtual_address);
             new_section_data.resize(new_resource_directory_size_aligned as usize, 0);
 
-            coff_header.number_of_sections += 1;
+            coff_header.number_of_sections =
+                coff_header.number_of_sections.checked_add(1).ok_or_else(|| {
+                    ImageWriteError::InvalidSectionRange(
+                        u64::from(coff_header.number_of_sections) + 1,
+                        u64::from(u16::MAX),
+                    )
+                })?;
             required_header_space += 40;
         }
 
@@ -554,7 +607,12 @@ impl<'a> Image<'a> {
             first_section_start,
             first_section.and_then(|section| section.name()).unwrap_or("?".to_string())
         );
-        let available_space = first_section_start - self.directories_offset as usize;
+        let available_space = first_section_start
+            .checked_sub(self.directories_offset as usize)
+            .ok_or(ImageWriteError::InvalidSectionRange(
+                self.directories_offset,
+                first_section_start as u64,
+            ))?;
         debug!("available header space: {:#x?}", available_space);
         debug!("required additional header space: {:#x?}", required_header_space);
         if required_header_space as usize > available_space {
@@ -565,22 +623,30 @@ impl<'a> Image<'a> {
             return Err(ImageWriteError::NotEnoughSpaceInHeader);
         }
 
-        let size_of_image = section_table
+        let size_of_image = match section_table
             .iter()
             .map(|section| u64::from(section.virtual_address) + u64::from(section.virtual_size))
             .max()
-            .map(|size| aligned_to(size, u64::from(windows_header.section_alignment())))
-            .and_then(|size| u32::try_from(size).ok())
-            .unwrap_or_else(|| windows_header.size_of_image());
+        {
+            Some(size) => {
+                let aligned = aligned_to(size, u64::from(windows_header.section_alignment()));
+                u32::try_from(aligned).map_err(|_| {
+                    ImageWriteError::InvalidSectionRange(aligned, u64::from(u32::MAX))
+                })?
+            }
+            None => windows_header.size_of_image(),
+        };
 
         match windows_header {
             GenericWindowsHeader::WindowsHeader32(ref mut header) => {
-                header.number_of_rva_and_sizes = header_data_directory.len() as u32;
+                header.number_of_rva_and_sizes =
+                    original_number_of_rva_and_sizes.max(header_data_directory.len() as u32);
                 header.size_of_image = size_of_image;
                 header.check_sum = 0;
             }
             GenericWindowsHeader::WindowsHeader64(ref mut header) => {
-                header.number_of_rva_and_sizes = header_data_directory.len() as u32;
+                header.number_of_rva_and_sizes =
+                    original_number_of_rva_and_sizes.max(header_data_directory.len() as u32);
                 header.size_of_image = size_of_image;
                 header.check_sum = 0;
             }
@@ -601,6 +667,11 @@ impl<'a> Image<'a> {
         for (_, data) in header_data_directory.iter() {
             new_image.extend_from_slice(data.as_bytes());
         }
+        if data_directories_end < old_optional_header_end {
+            new_image.extend_from_slice(
+                &self.image[data_directories_end as usize..old_optional_header_end as usize],
+            );
+        }
         for section_header in section_table.iter() {
             new_image.extend_from_slice(section_header.as_bytes());
         }
@@ -620,6 +691,7 @@ impl<'a> Image<'a> {
             // no resource section was found in the image, copy data of all sections
             new_image.extend_from_slice(&self.image[first_section_start..last_section_end]);
         }
+        new_image.resize(new_image.len() + new_section_padding, 0);
         new_image.extend_from_slice(&new_section_data);
         new_image.extend_from_slice(&self.image[last_section_end..]);
 
@@ -627,7 +699,14 @@ impl<'a> Image<'a> {
         self.windows_header = windows_header;
         self.header_data_directory = header_data_directory;
         self.section_table = section_table;
+        // add additional required header space to the directories offset
+        self.directories_offset += required_header_space;
 
+        resource_directory.virtual_address = self
+            .header_data_directory
+            .get(&DataDirectoryType::ResourceTable)
+            .unwrap()
+            .virtual_address;
         let previous_resource_directory = self.resource_directory.take();
         self.resource_directory = Some(resource_directory);
         self.image = new_image.into();
